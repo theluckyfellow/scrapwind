@@ -1,0 +1,145 @@
+import * as THREE from 'three';
+
+const READOUT_INTERVAL_SECONDS = 0.1; // the DOM doesn't need updating every frame
+const NEWTONS_PER_METRE = 2500;       // arrow length scale
+const MIN_ARROW_NEWTONS = 50;
+const ARROW_POOL_SIZE = 32;
+const ARROW_COLORS = { suspension: 0x6fe36f, tyre: 0xffa23a, thrust: 0x5fd8ff };
+const METRES_PER_SECOND_TO_KMH = 3.6;
+
+const DRIVE_HINTS = {
+  gamepad: 'RT gas · LT brake/reverse · A handbrake · Y rotors · B flip · Back respawn · Start tuning · D-pad up telemetry',
+  keyboard: 'W/S gas/brake · A/D steer · Space handbrake · F rotors · R flip · Backspace respawn · G tuning · T telemetry',
+};
+const FLY_HINTS = {
+  gamepad: 'Left stick tilt · RT climb · LT descend · LB/RB turn · Y stow rotors',
+  keyboard: 'W/A/S/D tilt · Space climb · Shift descend · Q/E turn · F stow rotors',
+};
+
+/**
+ * Telemetry: everything the player reads off the screen. The dashboard (speed, gear, revs, mode, control hints)
+ * is always on; the details view adds a per-wheel table and force arrows drawn on the buggy.
+ * Game updates it each frame; it reads the Vehicle and Controls through their methods.
+ */
+export class Telemetry {
+  root;
+  speedValue;
+  gearValue;
+  rpmFill;
+  modeLabel;
+  hintLine;
+  detailsPanel;
+  wheelRows = [];
+  arrows = [];
+  arrowGroup = new THREE.Group();
+  showingDetails = false;
+  sinceReadout = 0;
+
+  constructor(hudElement, scene) {
+    this.root = hudElement;
+    this.buildDashboard();
+    this.buildDetails();
+    for (let index = 0; index < ARROW_POOL_SIZE; index++) {
+      const arrow = new THREE.ArrowHelper(new THREE.Vector3(0, 1, 0), new THREE.Vector3(), 1, 0xffffff, 0.25, 0.15);
+      arrow.visible = false;
+      this.arrows.push(arrow);
+      this.arrowGroup.add(arrow);
+    }
+    this.arrowGroup.visible = false;
+    scene.add(this.arrowGroup);
+  }
+
+  /** Shows or hides the per-wheel table and force arrows. */
+  toggleDetails() {
+    this.showingDetails = !this.showingDetails;
+    this.detailsPanel.classList.toggle('hidden', !this.showingDetails);
+    this.arrowGroup.visible = this.showingDetails;
+  }
+
+  update(vehicle, controls, frameSeconds) {
+    if (this.showingDetails) this.drawArrows(vehicle.appliedForces());
+
+    this.sinceReadout += frameSeconds;
+    if (this.sinceReadout < READOUT_INTERVAL_SECONDS) return;
+    this.sinceReadout = 0;
+
+    this.speedValue.textContent = Math.round(vehicle.speed() * METRES_PER_SECOND_TO_KMH);
+    this.gearValue.textContent = vehicle.gearLabel();
+    this.rpmFill.style.width = `${Math.min(vehicle.rpmFraction(), 1) * 100}%`;
+    const flying = vehicle.flying();
+    this.modeLabel.textContent = flying ? 'ROTORS' : 'DRIVE';
+    this.modeLabel.classList.toggle('flying', flying);
+    const hints = flying ? FLY_HINTS : DRIVE_HINTS;
+    this.hintLine.textContent = controls.usingGamepad() ? hints.gamepad : hints.keyboard;
+
+    if (this.showingDetails) this.fillWheelTable(vehicle.wheelReadouts());
+  }
+
+  drawArrows(forces) {
+    let used = 0;
+    for (const { force, point, kind } of forces) {
+      const newtons = force.length();
+      if (newtons < MIN_ARROW_NEWTONS || used >= this.arrows.length) continue;
+      const arrow = this.arrows[used++];
+      arrow.position.copy(point);
+      arrow.setDirection(force.clone().divideScalar(newtons));
+      arrow.setLength(Math.max(newtons / NEWTONS_PER_METRE, 0.3), 0.25, 0.15);
+      arrow.setColor(ARROW_COLORS[kind]);
+      arrow.visible = true;
+    }
+    for (let index = used; index < this.arrows.length; index++) this.arrows[index].visible = false;
+  }
+
+  fillWheelTable(readouts) {
+    readouts.forEach((readout, index) => {
+      const cells = this.wheelRows[index];
+      cells.name.textContent = readout.name;
+      cells.load.textContent = readout.inContact ? `${Math.round(readout.load)} N` : '–';
+      cells.slip.textContent = readout.inContact ? `${readout.slipDegrees.toFixed(1)}°` : '–';
+      cells.surface.textContent = readout.surface;
+      cells.row.classList.toggle('sliding', readout.sliding);
+    });
+  }
+
+  buildDashboard() {
+    const dashboard = element('div', 'dashboard', this.root);
+    const speed = element('div', 'speed', dashboard);
+    this.speedValue = element('span', 'speed-value', speed, '0');
+    element('span', 'speed-unit', speed, 'km/h');
+    const gearBox = element('div', 'gear', dashboard);
+    element('span', 'gear-caption', gearBox, 'gear');
+    this.gearValue = element('span', 'gear-value', gearBox, '1');
+    const rpm = element('div', 'rpm', dashboard);
+    this.rpmFill = element('div', 'rpm-fill', rpm);
+
+    this.modeLabel = element('div', 'mode', this.root, 'DRIVE');
+    this.hintLine = element('div', 'hint', this.root, '');
+  }
+
+  buildDetails() {
+    this.detailsPanel = element('div', 'details hidden', this.root);
+    element('div', 'details-title', this.detailsPanel, 'Telemetry');
+    const table = element('table', '', this.detailsPanel);
+    const header = element('tr', '', table);
+    for (const title of ['Wheel', 'Load', 'Slip', 'Surface']) element('th', '', header, title);
+    for (let index = 0; index < 4; index++) {
+      const row = element('tr', '', table);
+      this.wheelRows.push({
+        row,
+        name: element('td', '', row),
+        load: element('td', '', row),
+        slip: element('td', '', row),
+        surface: element('td', '', row),
+      });
+    }
+    element('div', 'legend', this.detailsPanel, 'Arrows: green suspension · orange tyre · blue rotor thrust. Highlighted rows are sliding.');
+  }
+}
+
+function element(tag, className, parent, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  parent.appendChild(node);
+  return node;
+}

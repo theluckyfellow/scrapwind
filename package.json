@@ -1,0 +1,20 @@
+{
+  "name": "scrapwind",
+  "version": "0.1.0",
+  "description": "Scrapwind: build scrap buggies, haul cargo, grow a wasteland town",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.21.0",
+    "lil-gui": "^0.21.0",
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "vite": "^8.3.2"
+  }
+}
