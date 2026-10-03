@@ -3,11 +3,11 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js';
 import { toonMesh, toonMaterial, faceted } from './toon.js';
 
-/** Ground types: grip multiplies the tyre's grip; rolling resistance is a fraction of the tyre's load. */
+/** Ground types: grip multiplies the tyre's grip; rolling resistance is a fraction of the tyre's load; loose ground favours knobbly tyres. */
 export const SURFACES = {
   dirt: { name: 'Dirt', grip: 1.0, rollingResistance: 0.02, color: 0xc9915c },
-  sand: { name: 'Sand', grip: 0.72, rollingResistance: 0.07, color: 0xf0cf8f },
-  mud: { name: 'Mud', grip: 0.45, rollingResistance: 0.1, color: 0x6e4c35 },
+  sand: { name: 'Sand', grip: 0.72, rollingResistance: 0.07, color: 0xf0cf8f, loose: true },
+  mud: { name: 'Mud', grip: 0.45, rollingResistance: 0.1, color: 0x6e4c35, loose: true },
   rock: { name: 'Rock', grip: 1.1, rollingResistance: 0.012, color: 0x9c7462 },
   concrete: { name: 'Concrete', grip: 1.05, rollingResistance: 0.012, color: 0xcfc3ae },
   metal: { name: 'Scrap metal', grip: 0.85, rollingResistance: 0.012, color: 0x7d8a8c },

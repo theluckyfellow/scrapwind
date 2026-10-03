@@ -5,7 +5,7 @@ import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 
 // Brightness of each light step, darkest to brightest. Few, hard steps give the Killer7 graphic look.
 const LIGHT_STEPS = [0.45, 0.75, 1.0];
-const OUTLINE_COLOR = 0x241a14;
+export const OUTLINE_COLOR = 0x241a14;
 export const OUTLINE_THICKNESS = 0.035;
 
 const gradientMap = makeGradientMap(LIGHT_STEPS);
@@ -74,4 +74,19 @@ function makeGradientMap(steps) {
   texture.generateMipmaps = false;
   texture.needsUpdate = true;
   return texture;
+}
+
+/** Frees the GPU memory of everything under an object that was built for one-off use (shared materials survive). */
+export function disposeTree(object) {
+  object.traverse(child => {
+    child.geometry?.dispose();
+    const materials = Array.isArray(child.material) ? child.material : [child.material];
+    for (const material of materials) {
+      if (material && !isSharedMaterial(material)) material.dispose();
+    }
+  });
+}
+
+function isSharedMaterial(material) {
+  return [...outlineMaterials.values()].includes(material);
 }

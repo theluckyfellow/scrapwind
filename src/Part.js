@@ -1,19 +1,21 @@
 import * as THREE from 'three';
 
 /**
- * Part: anything bolted to a Chassis at a mount point: wheels and rotors today, engines and cargo racks later.
+ * Part: anything bolted to a Chassis at a mount point: wheels, batteries and rotors today, cargo racks later.
  * Holds the mount point, the visual, and a log of the pushes it made this step, which Telemetry draws as arrows.
- * Wheel and Rotor extend it; Vehicle keeps them all in one parts list and picks out each kind where it needs to.
+ * Wheel, Battery and Rotor extend it; Vehicle keeps them all in one parts list and picks out each kind where it needs to.
  */
 export class Part {
   name;
   mountPoint;                  // chassis-local, metres
+  mountId;                     // which Blueprint mount this part came from (mirrored twins share one)
   visual = new THREE.Group();  // child of the chassis visual, so it moves with the bodywork
   appliedForces = [];          // [{ force, point, kind }] in world space, this step only
 
-  constructor(name, mountPoint) {
+  constructor(name, mountPoint, mountId = null) {
     this.name = name;
     this.mountPoint = mountPoint.clone();
+    this.mountId = mountId;
     this.visual.position.copy(mountPoint);
   }
 

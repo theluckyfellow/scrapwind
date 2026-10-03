@@ -5,7 +5,7 @@ const STICK_DEADZONE = 0.15;
 const GAMEPAD = {
   leftStickX: 0, leftStickY: 1, rightStickX: 2, rightStickY: 3,
   a: 0, b: 1, x: 2, y: 3, leftBumper: 4, rightBumper: 5, leftTrigger: 6, rightTrigger: 7,
-  back: 8, start: 9, dpadUp: 12,
+  back: 8, start: 9, rightStickClick: 11, dpadUp: 12, dpadDown: 13,
 };
 
 const ANALOG_CONTROLS = [
@@ -18,6 +18,7 @@ const ANALOG_CONTROLS = [
   { name: 'climb', pad: pad => trigger(pad, GAMEPAD.rightTrigger), positiveKeys: ['Space'] },
   { name: 'descend', pad: pad => trigger(pad, GAMEPAD.leftTrigger), positiveKeys: ['ShiftLeft', 'ShiftRight'] },
   { name: 'yaw', pad: pad => trigger(pad, GAMEPAD.rightBumper) - trigger(pad, GAMEPAD.leftBumper), positiveKeys: ['KeyE'], negativeKeys: ['KeyQ'] },
+  { name: 'rideHeight', pad: pad => trigger(pad, GAMEPAD.dpadUp) - trigger(pad, GAMEPAD.dpadDown), positiveKeys: ['KeyX'], negativeKeys: ['KeyZ'] },
   { name: 'lookRight', pad: pad => stick(pad, GAMEPAD.rightStickX), positiveKeys: ['KeyL'], negativeKeys: ['KeyJ'] },
   { name: 'lookUp', pad: pad => -stick(pad, GAMEPAD.rightStickY), positiveKeys: ['KeyI'], negativeKeys: ['KeyK'] },
 ];
@@ -26,8 +27,9 @@ const BUTTON_CONTROLS = [
   { name: 'toggleRotors', padButton: GAMEPAD.y, keys: ['KeyF'] },
   { name: 'flipUpright', padButton: GAMEPAD.b, keys: ['KeyR'] },
   { name: 'respawn', padButton: GAMEPAD.back, keys: ['Backspace'] },
-  { name: 'toggleTuning', padButton: GAMEPAD.start, keys: ['KeyG'] },
-  { name: 'toggleTelemetry', padButton: GAMEPAD.dpadUp, keys: ['KeyT'] },
+  { name: 'toggleGarage', padButton: GAMEPAD.start, keys: ['Escape'] },
+  { name: 'toggleTuning', padButton: null, keys: ['KeyG'] },
+  { name: 'toggleTelemetry', padButton: GAMEPAD.rightStickClick, keys: ['KeyT'] },
 ];
 
 // Keys the browser would otherwise use to scroll or navigate.

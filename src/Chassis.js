@@ -1,38 +1,33 @@
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
-import { toonMesh, toonMaterial } from './toon.js';
+import { Bodywork } from './Bodywork.js';
 
 export const chassisTuning = {
-  mass: 650,                 // kg, the whole buggy
-  centerOfMassHeight: -0.3,  // m relative to the chassis origin; low keeps it on its wheels
-  inertiaScale: 1.6,         // above 1 acts like weight out at the corners: slower to pitch and roll
-  dragArea: 0.9,             // m², drag coefficient × frontal area
+  inertiaScale: 1.3,         // above 1 makes it slower to pitch and roll than the parts' masses alone suggest
   airControlTorque: 2200,    // N·m from the stick while airborne with the rotors stowed
   airborneSpinDamping: 2.0,  // 1/s; calms pitch and roll tumbling off ramp lips, so jumps land wheels-down more often
 };
 
-const HALF_EXTENTS = new THREE.Vector3(0.8, 0.3, 1.75);
+const COLLISION_TUBE_RADIUS = 0.06;  // m; fatter than the drawn tubes so thin rails don't slip past rocks
+const FLOOR_THICKNESS = 0.03;
 const AIR_DENSITY = 1.2; // kg/m³
 const LOCAL_UP = new THREE.Vector3(0, 1, 0);
 const LOCAL_FORWARD = new THREE.Vector3(0, 0, -1);
 const LOCAL_RIGHT = new THREE.Vector3(1, 0, 0);
 
-const PAINT = 0xe2582c;
-const CAGE = 0x2d2a28;
-const STEEL = 0x8a9496;
-const SEAT = 0x4a3b33;
-const DRIVER_SUIT = 0x3f8f8a;
-const HELMET = 0xf2d14b;
-
 /**
- * Chassis: the buggy's rigid body in Rapier, plus the bodywork you see.
- * Parts push on it through push() and twist(); Vehicle asks it where it is and how it moves.
+ * Chassis: the vehicle's rigid body in Rapier, built from a Blueprint: a collision capsule per frame tube,
+ * the floor pan and a box per battery, with mass and inertia worked out from every part. It carries the
+ * Bodywork you see. Parts push on it through push() and twist(); Vehicle asks it where it is and how it moves.
  * It keeps its last two physics poses so the bodywork can be drawn smoothly between physics steps.
  */
 export class Chassis {
   body;
-  collider;
+  bodywork;
   visual = new THREE.Group();
+  inertia = new THREE.Vector3(); // kg·m² about the chassis's own right, up and back axes
+  dragArea;                    // m², from the design's panels
+  downforceSurfaces;           // [{ position, area }] chassis-local
 
   // Pose at the start of the current physics step, used by every force calculation.
   position = new THREE.Vector3();
@@ -43,7 +38,7 @@ export class Chassis {
   latestPosition = new THREE.Vector3();
   latestQuaternion = new THREE.Quaternion();
 
-  constructor(world, spawnPosition, spawnQuaternion) {
+  constructor(world, blueprint, spawnPosition, spawnQuaternion) {
     const bodyDescription = RAPIER.RigidBodyDesc.dynamic()
       .setTranslation(spawnPosition.x, spawnPosition.y, spawnPosition.z)
       .setRotation(spawnQuaternion)
@@ -51,30 +46,34 @@ export class Chassis {
       .setCcdEnabled(true);
     this.body = world.createRigidBody(bodyDescription);
 
-    const colliderDescription = RAPIER.ColliderDesc.cuboid(HALF_EXTENTS.x, HALF_EXTENTS.y, HALF_EXTENTS.z)
-      .setFriction(0.5)
-      .setRestitution(0.1);
-    this.collider = world.createCollider(colliderDescription, this.body);
-    this.applyMassTuning();
+    for (const tube of blueprint.frameTubes()) this.attachTube(world, tube);
+    this.attachFloor(world, blueprint.body());
+    this.applyMassProperties(blueprint.massProperties());
+    this.dragArea = blueprint.dragArea();
+    this.downforceSurfaces = blueprint.downforceSurfaces().map(surface => ({
+      position: new THREE.Vector3(...surface.position),
+      area: surface.area,
+    }));
 
-    this.buildBodywork();
+    this.bodywork = new Bodywork(blueprint);
+    this.visual.add(this.bodywork.group);
     this.capturePose();
     this.capturePose();
   }
 
-  /** Re-reads chassisTuning's mass, centre of mass and inertia; the tuning panel calls this. */
-  applyMassTuning() {
-    const { mass, centerOfMassHeight, inertiaScale } = chassisTuning;
-    const width = HALF_EXTENTS.x * 2;
-    const height = HALF_EXTENTS.y * 2;
-    const length = HALF_EXTENTS.z * 2;
-    // Solid-box inertia about each axis, scaled up because real mass sits out at the wheels.
-    const inertia = {
-      x: (mass / 12) * (height * height + length * length) * inertiaScale,
-      y: (mass / 12) * (width * width + length * length) * inertiaScale,
-      z: (mass / 12) * (width * width + height * height) * inertiaScale,
-    };
-    this.collider.setMassProperties(mass, { x: 0, y: centerOfMassHeight, z: 0 }, inertia, { x: 0, y: 0, z: 0, w: 1 });
+  /** Sets mass, centre of mass and inertia; colliders have no density, so these are the whole story. */
+  applyMassProperties({ mass, centerOfMass, inertia }) {
+    this.inertia.copy(inertia).multiplyScalar(chassisTuning.inertiaScale);
+    this.body.setAdditionalMassProperties(mass, centerOfMass, this.inertia, { x: 0, y: 0, z: 0, w: 1 }, true);
+  }
+
+  /** Adds a box to collide with (a battery, say), chassis-local. */
+  attachBox(world, size, position) {
+    const description = RAPIER.ColliderDesc.cuboid(size[0] / 2, size[1] / 2, size[2] / 2)
+      .setTranslation(position.x, position.y, position.z)
+      .setDensity(0)
+      .setFriction(0.5);
+    world.createCollider(description, this.body);
   }
 
   /** Clears last step's forces and caches the pose every part will measure against this step. */
@@ -121,8 +120,11 @@ export class Chassis {
   mass() { return this.body.mass(); }
   localCenterOfMass(target = new THREE.Vector3()) { return target.copy(this.body.localCom()); }
   worldCenterOfMass(target = new THREE.Vector3()) { return target.copy(this.body.worldCom()); }
-  /** Rotational inertia about the chassis's own right, up and back axes. */
-  principalInertia(target = new THREE.Vector3()) { return target.copy(this.body.principalInertia()); }
+  /**
+   * Rotational inertia about the chassis's own right, up and back axes. Kept from what we set, because Rapier
+   * reports its principal inertia sorted by size, not in the chassis's axis order.
+   */
+  principalInertia(target = new THREE.Vector3()) { return target.copy(this.inertia); }
 
   /** Pushes on the chassis at a world point (N). */
   push(force, worldPoint) { this.body.addForceAtPoint(force, worldPoint, true); }
@@ -130,17 +132,24 @@ export class Chassis {
   /** Twists the chassis about a world axis (N·m). */
   twist(torque) { this.body.addTorque(torque, true); }
 
-  /** Air resistance against the direction of travel; extraDragArea comes from deployed rotors. */
-  applyDrag(extraDragArea) {
+  /** Air resistance against the direction of travel, and downforce from wings and splitters at speed. */
+  applyAero(extraDragArea) {
     const velocity = this.linearVelocity();
     const speed = velocity.length();
     if (speed < 0.01) return;
-    const dragArea = chassisTuning.dragArea + extraDragArea;
-    const drag = velocity.multiplyScalar(-0.5 * AIR_DENSITY * dragArea * speed);
+    const drag = velocity.multiplyScalar(-0.5 * AIR_DENSITY * (this.dragArea + extraDragArea) * speed);
     this.body.addForce(drag, true);
+
+    const forwardSpeed = Math.max(this.forwardSpeed(), 0);
+    const pressure = 0.5 * AIR_DENSITY * forwardSpeed * forwardSpeed;
+    if (pressure < 1) return;
+    const down = this.up().negate();
+    for (const surface of this.downforceSurfaces) {
+      this.push(down.clone().multiplyScalar(pressure * surface.area), this.toWorld(surface.position));
+    }
   }
 
-  /** Lets the driver pitch and roll the buggy mid-jump; inputs are -1..1, forward tilts the nose down. */
+  /** Lets the driver pitch and roll mid-jump; inputs are -1..1, forward tilts the nose down. */
   applyAirControl(tiltForward, tiltRight) {
     const torque = this.right().multiplyScalar(-tiltForward * chassisTuning.airControlTorque)
       .add(this.forward().multiplyScalar(tiltRight * chassisTuning.airControlTorque));
@@ -167,8 +176,16 @@ export class Chassis {
     this.capturePose();
   }
 
+  /** Takes the body (and its colliders) out of the physics world. */
+  dispose(world) {
+    world.removeRigidBody(this.body);
+  }
+
   /** The Rapier body, only for physics queries that must ignore this vehicle. */
   physicsBody() { return this.body; }
+
+  /** Meshes parts can be mounted on, for the garage. */
+  mountSurfaces() { return this.bodywork.mountSurfaces; }
 
   /** Moves the bodywork to a blend of the last two physics poses (alpha 0 = previous, 1 = latest). */
   updateVisual(alpha) {
@@ -180,59 +197,34 @@ export class Chassis {
   drawnPosition(target = new THREE.Vector3()) { return target.copy(this.visual.position); }
   drawnQuaternion(target = new THREE.Quaternion()) { return target.copy(this.visual.quaternion); }
 
-  buildBodywork() {
-    const add = (geometry, color, x, y, z, options) => {
-      const mesh = toonMesh(geometry, color, options);
-      mesh.position.set(x, y, z);
-      this.visual.add(mesh);
-      return mesh;
-    };
+  attachTube(world, { start, end }) {
+    const from = new THREE.Vector3(...start);
+    const to = new THREE.Vector3(...end);
+    const length = from.distanceTo(to);
+    if (length < 0.01) return;
+    const middle = from.clone().lerp(to, 0.5);
+    const rotation = new THREE.Quaternion().setFromUnitVectors(LOCAL_UP, to.clone().sub(from).normalize());
+    const description = RAPIER.ColliderDesc.capsule(length / 2, COLLISION_TUBE_RADIUS)
+      .setTranslation(middle.x, middle.y, middle.z)
+      .setRotation(rotation)
+      .setDensity(0)
+      .setFriction(0.5)
+      .setRestitution(0.1);
+    world.createCollider(description, this.body);
+  }
 
-    // Tub and nose
-    add(new THREE.BoxGeometry(1.6, 0.42, 3.0), PAINT, 0, -0.08, 0.15);
-    const nose = add(new THREE.BoxGeometry(1.4, 0.32, 0.9), PAINT, 0, -0.1, -1.55);
-    nose.rotation.x = -0.28;
-    add(new THREE.BoxGeometry(1.9, 0.14, 0.18), CAGE, 0, -0.2, -2.0); // front bumper
-    add(new THREE.BoxGeometry(1.7, 0.14, 0.16), CAGE, 0, -0.18, 1.72); // rear bumper
-
-    // Seat and driver
-    add(new THREE.BoxGeometry(0.62, 0.5, 0.5), SEAT, 0, 0.3, 0.15);
-    add(new THREE.BoxGeometry(0.5, 0.55, 0.4), DRIVER_SUIT, 0, 0.55, -0.05);
-    add(new THREE.IcosahedronGeometry(0.24, 1), HELMET, 0, 0.98, -0.08);
-    add(new THREE.BoxGeometry(0.34, 0.09, 0.08), CAGE, 0, 1.0, -0.3); // goggles
-
-    // Roll cage: two hoops joined by top rails
-    const tube = (x1, y1, z1, x2, y2, z2) => {
-      const start = new THREE.Vector3(x1, y1, z1);
-      const end = new THREE.Vector3(x2, y2, z2);
-      const length = start.distanceTo(end);
-      const mesh = toonMesh(new THREE.BoxGeometry(0.09, length, 0.09), CAGE, { outline: 0.02 });
-      mesh.position.lerpVectors(start, end, 0.5);
-      mesh.quaternion.setFromUnitVectors(LOCAL_UP, end.clone().sub(start).normalize());
-      this.visual.add(mesh);
-    };
-    tube(-0.7, 0.12, -0.75, -0.55, 1.3, -0.45);
-    tube(0.7, 0.12, -0.75, 0.55, 1.3, -0.45);
-    tube(-0.7, 0.12, 0.75, -0.55, 1.3, 0.55);
-    tube(0.7, 0.12, 0.75, 0.55, 1.3, 0.55);
-    tube(-0.55, 1.3, -0.45, 0.55, 1.3, -0.45);
-    tube(-0.55, 1.3, 0.55, 0.55, 1.3, 0.55);
-    tube(-0.55, 1.3, -0.45, -0.55, 1.3, 0.55);
-    tube(0.55, 1.3, -0.45, 0.55, 1.3, 0.55);
-
-    // Engine block, exhaust stacks and a spare tyre on the back
-    add(new THREE.BoxGeometry(0.95, 0.5, 0.75), STEEL, 0, 0.32, 1.15);
-    for (const side of [-1, 1]) {
-      const stack = add(new THREE.CylinderGeometry(0.06, 0.07, 0.7, 6), CAGE, side * 0.32, 0.75, 1.42, { outline: 0.02 });
-      stack.rotation.x = 0.25;
-    }
-    const spare = add(new THREE.CylinderGeometry(0.36, 0.36, 0.22, 12), 0x2a2522, 0, 0.32, 1.78);
-    spare.rotation.x = Math.PI / 2;
-
-    // Headlights glow a little so they read at dusk
-    const lampMaterial = toonMaterial(0xfff2c0, { emissive: 0xffe08a, emissiveIntensity: 0.6 });
-    for (const side of [-1, 1]) {
-      add(new THREE.BoxGeometry(0.26, 0.16, 0.08), null, side * 0.45, 0.02, -1.98, { material: lampMaterial, outline: 0.02 });
+  /** A solid floor pan, so bottoming out lands on something even where no tube runs. */
+  attachFloor(world, body) {
+    for (let index = 0; index < body.rings.length - 1; index++) {
+      const [here, next] = [body.rings[index], body.rings[index + 1]];
+      const halfWidth = Math.min(here.bottomHalfWidth, next.bottomHalfWidth);
+      const halfLength = (next.z - here.z) / 2;
+      const y = Math.max(here.bottom, next.bottom);
+      const description = RAPIER.ColliderDesc.cuboid(halfWidth, FLOOR_THICKNESS / 2, halfLength)
+        .setTranslation(0, y, (here.z + next.z) / 2)
+        .setDensity(0)
+        .setFriction(0.5);
+      world.createCollider(description, this.body);
     }
   }
 }

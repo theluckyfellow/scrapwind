@@ -19,6 +19,8 @@ async function main() {
     PHYSICS_STEP_SECONDS,
   );
   document.getElementById('loading').remove();
+  // In development, the game is reachable from the browser console for poking at.
+  if (import.meta.env.DEV) window.scrapwind = game;
   runLoop(game);
 }
 

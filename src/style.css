@@ -195,3 +195,256 @@ body {
 .lil-gui.root {
   pointer-events: auto;
 }
+
+#hud.hidden,
+.garage-menu.hidden,
+input.hidden {
+  display: none;
+}
+
+.dash-readouts {
+  display: flex;
+  justify-content: space-between;
+  grid-column: 1 / span 2;
+  font-size: 13px;
+  opacity: 0.8;
+}
+
+.charge-fill {
+  background: linear-gradient(90deg, #6fe36f, #9be38f);
+}
+
+.charge-fill.low {
+  background: #ff4a3a;
+}
+
+/* ---- Garage ---- */
+
+.garage-menu {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  font-size: 13px;
+}
+
+.garage-panel {
+  position: absolute;
+  top: 16px;
+  bottom: 16px;
+  width: 300px;
+  overflow-y: auto;
+  padding: 14px 16px 18px;
+  pointer-events: auto;
+  background: var(--panel);
+  border: 3px solid var(--ink);
+  border-radius: 12px;
+  box-shadow: 6px 6px 0 rgba(36, 26, 20, 0.35);
+  scrollbar-width: thin;
+}
+
+.garage-left {
+  left: 16px;
+}
+
+.garage-right {
+  right: 16px;
+}
+
+.garage-title {
+  font-size: 26px;
+  color: var(--warning);
+  margin-bottom: 4px;
+}
+
+.garage-heading {
+  margin: 14px 0 6px;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--warning);
+}
+
+.garage-choices {
+  display: grid;
+  gap: 6px;
+}
+
+.garage-panel button,
+.garage-panel select,
+.garage-panel input {
+  font-family: var(--font);
+  font-size: 13px;
+  color: var(--cream);
+  background: rgba(255, 243, 220, 0.08);
+  border: 2px solid rgba(255, 243, 220, 0.18);
+  border-radius: 7px;
+}
+
+.garage-panel button {
+  cursor: pointer;
+  padding: 6px 10px;
+}
+
+.garage-panel button:hover {
+  border-color: rgba(255, 243, 220, 0.5);
+}
+
+.garage-choice {
+  display: grid;
+  gap: 2px;
+  text-align: left;
+}
+
+.garage-choice.selected {
+  background: rgba(95, 216, 255, 0.18);
+  border-color: var(--sky);
+}
+
+.garage-choice.armed {
+  border-color: var(--warning);
+}
+
+.choice-name {
+  font-size: 14px;
+}
+
+.choice-detail {
+  font-family: system-ui, sans-serif;
+  font-size: 11.5px;
+  opacity: 0.7;
+}
+
+.garage-options {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+}
+
+.garage-check {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  cursor: pointer;
+}
+
+.garage-hint {
+  margin-top: 14px;
+  padding: 8px 10px;
+  font-family: system-ui, sans-serif;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink);
+  background: var(--warning);
+  border-radius: 7px;
+}
+
+.garage-name {
+  width: 100%;
+  padding: 7px 9px;
+  font-size: 18px !important;
+}
+
+.garage-ride {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.garage-ride input {
+  flex: 1;
+  accent-color: var(--sky);
+}
+
+.garage-ride-value {
+  min-width: 52px;
+  text-align: right;
+}
+
+.garage-note {
+  margin-top: 4px;
+  font-family: system-ui, sans-serif;
+  font-size: 11.5px;
+  line-height: 1.4;
+  opacity: 0.7;
+}
+
+.garage-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.garage-swatch {
+  width: 28px;
+  height: 28px;
+  padding: 0 !important;
+  border-radius: 50% !important;
+}
+
+.garage-swatch.selected {
+  border: 3px solid var(--cream) !important;
+}
+
+.garage-panels {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 10px;
+  align-items: center;
+}
+
+.garage-panels select {
+  padding: 4px 6px;
+}
+
+.garage-stats {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 3px 10px;
+}
+
+.stat-label {
+  opacity: 0.7;
+}
+
+.stat-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.garage-warnings {
+  margin: 10px 0 0;
+  padding: 8px 10px 8px 26px;
+  font-family: system-ui, sans-serif;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink);
+  background: #ffb13a;
+  border-radius: 7px;
+}
+
+.garage-warnings.all-good {
+  background: #8fe38a;
+}
+
+.garage-designs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.garage-designs select {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+}
+
+.garage-drive {
+  width: 100%;
+  margin-top: 16px;
+  padding: 12px !important;
+  font-size: 20px !important;
+  color: var(--ink) !important;
+  background: var(--accent) !important;
+  border: 3px solid var(--ink) !important;
+  transform: skewX(-6deg);
+}

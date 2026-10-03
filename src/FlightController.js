@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { rotorTuning } from './Rotor.js';
+import { balancedShares } from './balance.js';
 
 export const flightTuning = {
   maxTiltDegrees: 24,
@@ -25,10 +26,11 @@ const YAW_AUTHORITY = 0.35;
 // Never dive harder than this (m/s²), so the rotors always keep enough thrust to level and turn.
 const MAX_DIVE_ACCELERATION = 0.5 * GRAVITY;
 const RIDE_HEIGHT = 0.9; // m from the centre of mass down to the ground when parked
+const MIN_LEVER_SPREAD = 0.05; // m² of summed lever arm below which an axis can't be controlled
 
 /**
- * FlightController: the buggy's drone brain. Turns the pilot's tilt, climb and turn requests into four
- * rotor thrusts, self-levelling and holding height when the sticks are let go.
+ * FlightController: the vehicle's drone brain. Turns the pilot's tilt, climb and turn requests into a thrust
+ * for every rotor, self-levelling and holding height when the sticks are let go.
  * Vehicle calls fly() each step while the rotors are out; it reads the Chassis and commands each Rotor.
  * Thrust is split by each rotor's lever arm, so the same maths keeps working when the builder moves rotors.
  */
@@ -46,7 +48,7 @@ export class FlightController {
     }
 
     if (grounded && climbInput <= INPUT_THRESHOLD) {
-      for (const rotor of rotors) rotor.command(flightTuning.groundIdle * rotorTuning.maxThrust);
+      for (const rotor of rotors) rotor.command(flightTuning.groundIdle * rotor.maxThrust());
       this.holdAltitude = altitude;
       return;
     }
@@ -125,7 +127,7 @@ export class FlightController {
   /**
    * Splits collective thrust and a chassis-local torque across the rotors by their lever arms.
    * Pitch comes from front-versus-back thrust, roll from left-versus-right, and turning from the
-   * difference between clockwise and anticlockwise rotors' blade drag.
+   * difference between clockwise and anticlockwise rotors' blade drag. Works for any rotor layout.
    */
   mix(chassis, rotors, collective, localTorque) {
     const centerOfMass = chassis.localCenterOfMass();
@@ -133,16 +135,31 @@ export class FlightController {
     const sumZSquared = arms.reduce((sum, arm) => sum + arm.z * arm.z, 0);
     const sumXSquared = arms.reduce((sum, arm) => sum + arm.x * arm.x, 0);
 
-    const pitchShare = localTorque.x / sumZSquared;
-    const rollShare = localTorque.z / sumXSquared;
-    const baseThrust = collective / rotors.length;
+    // Rotors all in a line can't pitch (or roll) the vehicle; ask for nothing rather than divide by zero.
+    const pitchShare = sumZSquared > MIN_LEVER_SPREAD ? localTorque.x / sumZSquared : 0;
+    const rollShare = sumXSquared > MIN_LEVER_SPREAD ? localTorque.z / sumXSquared : 0;
+    // Lift is shared so it doesn't tip the vehicle: rotors nearer the centre of mass carry more.
+    const lift = balancedShares(arms.map(arm => [arm.x, arm.z]), 0, 0, collective);
     const hoverThrust = chassis.mass() * GRAVITY / rotors.length;
-    const yawLimit = Math.min(hoverThrust * YAW_AUTHORITY, baseThrust);
+    const yawLimit = Math.min(hoverThrust * YAW_AUTHORITY, collective / rotors.length);
     const yawShare = THREE.MathUtils.clamp(localTorque.y / (rotorTuning.yawTorquePerThrust * rotors.length), -yawLimit, yawLimit);
+    const differentials = rotors.map((rotor, index) => -pitchShare * arms[index].z + rollShare * arms[index].x - yawShare * rotor.spinSign());
 
+    // Staying level beats climbing: shrink the corrections if they can't fit between zero and full thrust,
+    // then scale the lift so every rotor keeps its correction inside its limits.
+    const widest = Math.max(...differentials) - Math.min(...differentials);
+    const room = Math.min(...rotors.map(rotor => rotor.maxThrust()));
+    const squeeze = widest > room ? room / widest : 1;
+    let liftScale = 1;
     rotors.forEach((rotor, index) => {
-      const arm = arms[index];
-      rotor.command(baseThrust - pitchShare * arm.z + rollShare * arm.x - yawShare * rotor.spinSign());
+      const correction = differentials[index] * squeeze;
+      if (lift[index] > 0) liftScale = Math.min(liftScale, (rotor.maxThrust() - correction) / lift[index]);
     });
+    rotors.forEach((rotor, index) => {
+      const correction = differentials[index] * squeeze;
+      if (lift[index] > 0) liftScale = Math.max(liftScale, -correction / lift[index]);
+    });
+
+    rotors.forEach((rotor, index) => rotor.command(lift[index] * liftScale + differentials[index] * squeeze));
   }
 }
