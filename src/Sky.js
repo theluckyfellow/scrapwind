@@ -19,7 +19,7 @@ const SUN_DISTANCE = 200;       // how far up-sun the shadow-casting light sits
 // The neighbour: a vast pale moon over the north-east, close enough to show its maria. Angular
 // sizes in the shader are direction-space radii; MOON_RADIUS ≈ 6°.
 const MOON_DIRECTION = new THREE.Vector3(0.42, 0.4, -0.8).normalize();
-const MOON_RADIUS = 0.105;
+const MOON_RADIUS = 0.115;
 const MOON_PALE = 0xd8cfc2;
 const MOON_MARIA = 0xa89a88;
 const AURORA_GREEN = 0x3fe8b0;
@@ -129,6 +129,13 @@ export class Sky {
         uniform float uAwakening;
         varying vec3 viewDirection;
 
+        /** One crater: a soft bowl of maria with a thin bright rim just outside its edge. */
+        void moonCrater(float pU, float pV, float cU, float cV, float radius, inout float craters, inout float rims) {
+          float d = length(vec2(pU - cU, pV - cV));
+          craters += smoothstep(radius, radius * 0.45, d) * 0.55;
+          rims += smoothstep(radius * 1.35, radius * 1.08, d) * smoothstep(radius * 0.96, radius * 1.1, d) * 0.6;
+        }
+
         void main() {
           vec3 direction = normalize(viewDirection);
           float height = direction.y;
@@ -136,7 +143,7 @@ export class Sky {
             ? mix(horizonColor, zenithColor, smoothstep(0.0, 0.5, height))
             : mix(horizonColor, belowColor, smoothstep(0.0, -0.15, height));
 
-          // The neighbour: a vast pale moon, flat and graphic, its maria like spilled ash.
+          // The neighbour: a vast pale moon — a clean shaded disk with a few honest craters.
           vec3 moonDirectionN = normalize(moonDirection);
           vec3 offset = direction - moonDirectionN * dot(direction, moonDirectionN);
           vec3 tangentU = normalize(cross(moonDirectionN, vec3(0.0, 1.0, 0.0)));
@@ -144,13 +151,22 @@ export class Sky {
           float moonU = dot(offset, tangentU);
           float moonV = dot(offset, tangentV);
           float moonR = length(offset);
-          float disk = 1.0 - smoothstep(moonRadius - 0.003, moonRadius, moonR);
+          // A wide faint halo: the moon hangs in the valley's dust.
+          color += moonPale * pow(max(dot(direction, moonDirectionN), 0.0), 160.0) * 0.22;
+          float disk = 1.0 - smoothstep(moonRadius - 0.0025, moonRadius, moonR);
           if (disk > 0.0) {
-            float maria = 0.5 + 0.5 * sin(moonU * 55.0 + 1.7) * sin(moonV * 48.0 - 0.6)
-              + 0.25 * sin(moonU * 120.0) * sin(moonV * 130.0);
-            vec3 moonColor = mix(moonPale, moonMaria, smoothstep(0.35, 0.75, maria));
-            moonColor *= 0.9 + 0.1 * smoothstep(-moonRadius, moonRadius, moonV); // faint light from below
-            color = mix(color, moonColor, disk * 0.9);
+            // Shaded like a solid body: lit from the lower left, falling away across the disk.
+            float lit = 0.68 + 0.32 * smoothstep(0.07, -0.07, moonU + moonV);
+            float craters = 0.0;
+            float rims = 0.0;
+            moonCrater(moonU, moonV, -0.020, 0.016, 0.015, craters, rims);
+            moonCrater(moonU, moonV, 0.030, -0.008, 0.010, craters, rims);
+            moonCrater(moonU, moonV, -0.041, -0.022, 0.012, craters, rims);
+            moonCrater(moonU, moonV, 0.008, -0.038, 0.018, craters, rims);
+            moonCrater(moonU, moonV, 0.048, 0.028, 0.007, craters, rims);
+            vec3 moonColor = mix(moonPale, moonMaria, clamp(craters, 0.0, 0.85));
+            moonColor *= lit + rims * 0.4; // crater rims catch the light
+            color = mix(color, moonColor, disk * 0.96);
           }
 
           // Aurora ribbons: slow green-violet curtains high up, breathing on a long period.

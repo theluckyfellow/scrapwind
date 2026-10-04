@@ -5,13 +5,15 @@ import * as THREE from 'three';
 // just moves gains and pitches toward their targets, so the frame rate never matters.
 const MASTER_GAIN = 0.4;
 const WIND_FULL_SPEED = 55;   // m/s where the wind reaches full voice
-// The hub motors: EV inverter whine — clean sines pitched by revs, no engine rasp, no idle rumble.
-// A standstill electric is nearly silent; the whine rises with wheel revs and the pack's effort.
-const EV_BASE_HZ = 90;
-const EV_PITCH_PER_SPIN = 3.2;  // Hz of whine per rad/s of average wheel spin
-const EV_MAX_HZ = 900;
-const EV_OCTAVE_GAIN = 0.35;    // the 2× harmonic: machine-like, but no firing order
-const EV_HARMONIC_GAIN = 0.16;  // the 3× harmonic: a faint top edge
+// The hub motors: EV inverter whine. One dominant sweeping tone, a slightly detuned twin beating
+// against it, one faint non-integer partial. No harmonic ladders and no sub-bass: those are what
+// make a sound read as combustion. Nearly silent at a standstill, like a real electric.
+const EV_BASE_HZ = 150;
+const EV_PITCH_PER_SPIN = 3.0;  // Hz of whine per rad/s of average wheel spin
+const EV_MAX_HZ = 950;
+const EV_TWIN_DETUNE_HZ = 2.5;  // the beat: movement without any firing order
+const EV_OCTAVE_RATIO = 2.02;   // inexact on purpose: exact ratios read as engine harmonics
+const EV_OCTAVE_GAIN = 0.12;
 const EV_SPIN_FULL = 45;        // rad/s of wheel spin where the whine reaches full voice
 const ROTOR_BASE_HZ = 110;
 const ROTOR_PITCH_PER_THRUST = 340; // Hz above base at full thrust
@@ -67,29 +69,29 @@ export class Sound {
     noise.connect(this.windFilter).connect(this.windGain).connect(master);
     noise.start();
 
-    // The hub motors: EV inverter whine — a sine fundamental with quiet upper harmonics.
+    // The hub motors: EV inverter whine — fundamental + beating twin + one faint inexact partial.
     this.motorFilter = context.createBiquadFilter();
     this.motorFilter.type = 'lowpass';
-    this.motorFilter.frequency.value = 900;
+    this.motorFilter.frequency.value = 1500;
     this.motorGain = context.createGain();
     this.motorGain.gain.value = 0;
-    this.motorOsc = context.createOscillator();      // the fundamental whine
+    this.motorOsc = context.createOscillator();      // the dominant whine
     this.motorOsc.type = 'sine';
-    this.motorOctave = context.createOscillator();   // 2× — the machine's voice
+    this.motorTwin = context.createOscillator();     // detuned twin: the beat that makes it shimmer
+    this.motorTwin.type = 'sine';
+    this.motorTwinGain = context.createGain();
+    this.motorTwinGain.gain.value = 0.55;
+    this.motorOctave = context.createOscillator();   // faint 2.02× — mechanical, not combustion
     this.motorOctave.type = 'sine';
     this.motorOctaveGain = context.createGain();
     this.motorOctaveGain.gain.value = EV_OCTAVE_GAIN;
-    this.motorHarmonic = context.createOscillator(); // 3× — a faint top edge
-    this.motorHarmonic.type = 'sine';
-    this.motorHarmonicGain = context.createGain();
-    this.motorHarmonicGain.gain.value = EV_HARMONIC_GAIN;
     this.motorOsc.connect(this.motorFilter);
+    this.motorTwin.connect(this.motorTwinGain).connect(this.motorFilter);
     this.motorOctave.connect(this.motorOctaveGain).connect(this.motorFilter);
-    this.motorHarmonic.connect(this.motorHarmonicGain).connect(this.motorFilter);
     this.motorFilter.connect(this.motorGain).connect(master);
     this.motorOsc.start();
+    this.motorTwin.start();
     this.motorOctave.start();
-    this.motorHarmonic.start();
 
     // The rotors: a thin triangle tone, pitch and level riding the thrust.
     this.rotorGain = context.createGain();
@@ -175,10 +177,10 @@ export class Sound {
     const spinFraction = THREE.MathUtils.clamp(spin / EV_SPIN_FULL, 0, 1);
     const motorHz = Math.min(EV_BASE_HZ + spin * EV_PITCH_PER_SPIN, EV_MAX_HZ);
     ease(this.motorOsc.frequency, motorHz);
-    ease(this.motorOctave.frequency, motorHz * 2);
-    ease(this.motorHarmonic.frequency, motorHz * 3);
-    ease(this.motorFilter.frequency, 900 + motorHz * 1.6);
-    ease(this.motorGain.gain, powerFraction * (0.10 + 0.34 * spinFraction));
+    ease(this.motorTwin.frequency, motorHz + EV_TWIN_DETUNE_HZ);
+    ease(this.motorOctave.frequency, motorHz * EV_OCTAVE_RATIO);
+    ease(this.motorFilter.frequency, 1500 + motorHz);
+    ease(this.motorGain.gain, powerFraction * (0.05 + 0.38 * spinFraction));
 
     const rotors = vehicle.rotors();
     const thrust = rotors.length

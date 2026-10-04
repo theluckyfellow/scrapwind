@@ -249,6 +249,7 @@ export class GarageMenu {
       this.statCells.push([element('span', 'stat-value', table), format]);
     }
     this.warningList = element('ul', 'garage-warnings', panel);
+    element('div', 'garage-note', panel, 'Charge: batteries hold it, surge capacitors burst it, the regen dial takes braking back — and the glowing surge pads around the valley pour it in. Park on a pad while it glows.');
 
     this.buildMultiplayerPanel(panel);
 
