@@ -87,11 +87,12 @@ export class GarageMenu {
   designSelect;
   importInput;
 
-  constructor(parent, garage, onTestDrive, net = null, onOpenController = null) {
+  constructor(parent, garage, onTestDrive, net = null, onOpenController = null, grid = null) {
     this.garage = garage;
     this.onOpenController = onOpenController;
     this.onTestDrive = onTestDrive;
     this.net = net;
+    this.grid = grid;
     this.root = element('div', 'garage-menu', parent);
     this.buildBuildPanel(element('div', 'garage-panel garage-left', this.root));
     this.buildDesignPanel(element('div', 'garage-panel garage-right', this.root));
@@ -250,6 +251,13 @@ export class GarageMenu {
     }
     this.warningList = element('ul', 'garage-warnings', panel);
     element('div', 'garage-note', panel, 'Charge: batteries hold it, surge capacitors burst it, the regen dial takes braking back — and the glowing surge pads around the valley pour it in. Park on a pad while it glows.');
+    if (this.grid) {
+      const valley = element('div', 'garage-designs', panel);
+      button('', valley, 'Reset the valley', () => {
+        this.grid.reset();
+        this.setHint("The valley forgets: every relay dark but the Yard's. Go wake them again.");
+      });
+    }
 
     this.buildMultiplayerPanel(panel);
 

@@ -129,7 +129,7 @@ export class Game {
       onNotice: text => this.toast.show(text),
     });
     this.net.connect();
-    this.garageMenu = new GarageMenu(document.body, this.garage, blueprint => this.startDrive(blueprint), this.net, () => this.controllerSetup.show());
+    this.garageMenu = new GarageMenu(document.body, this.garage, blueprint => this.startDrive(blueprint), this.net, () => this.controllerSetup.show(), this.grid);
     this.garageMenu.attachGrid(this.grid);
     this.tuningPanel = new TuningPanel([
       { title: 'Chassis', record: chassisTuning, onChange: () => this.vehicle?.applyMassTuning() },

@@ -7,6 +7,7 @@ const STRIP_COLOR = new THREE.Color(0x5fd8ff);
 const SPARK_COLOR = new THREE.Color(0xeafcff);
 const TERMINAL_COLOR = 0x8a9496;
 const STRIP_HEIGHT = 0.024;
+const REARM_FRACTION = 0.15; // once flat, a capacitor stays flat until it holds a real charge again
 
 /**
  * Capacitor: a surge capacitor bolted to the frame. It holds a burst of energy the hub motors can draw
@@ -17,6 +18,7 @@ const STRIP_HEIGHT = 0.024;
 export class Capacitor extends Part {
   model;
   charge;            // joules left in the burst
+  rearmed = true;    // false once drained flat: the surge gate stays shut until there's charge worth surging
   deliveredWatts = 0;
 
   constructor(name, model, position, mountId) {
@@ -28,9 +30,13 @@ export class Capacitor extends Part {
 
   size() { return this.model.size; }
 
-  /** Watts it can add right now: full burst while it holds any charge at all. */
+  /** Watts it can add right now: full burst while it holds any charge at all — but a drained can
+   * stays out of the game until it has recharged a real fraction, so holding boost pulses cleanly
+   * instead of flickering on every trickle sliver. */
   availableSurge() {
-    return this.charge > 0 ? this.model.surgeWatts : 0;
+    if (this.charge <= 0) this.rearmed = false;
+    else if (!this.rearmed) this.rearmed = this.charge >= this.model.surgeJoules * REARM_FRACTION;
+    return this.rearmed && this.charge > 0 ? this.model.surgeWatts : 0;
   }
 
   /** Watts it wants from the batteries to top itself up; zero once full. */
@@ -66,6 +72,7 @@ export class Capacitor extends Part {
   reset() {
     super.reset();
     this.charge = this.model.surgeJoules;
+    this.rearmed = true;
     this.deliveredWatts = 0;
   }
 
