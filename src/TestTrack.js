@@ -1238,7 +1238,7 @@ export class TestTrack {
       this.addFixed(null, description, 'metal');
     }
 
-    // Work canopies: a flat roof on poles, one wearing solar tiles, one sheltering the charge point.
+    // Work canopies: a flat roof on poles, one wearing solar tiles. (Vehicles charge at the Yard Relay, not here.)
     for (const [local, solar] of [[[-2, -2], true], [[8, 6], false]]) {
       const origin = at(local);
       const roof = new THREE.Mesh(new THREE.BoxGeometry(6, 0.15, 5));
@@ -1293,12 +1293,6 @@ export class TestTrack {
       post.position.copy(signOrigin).add(new THREE.Vector3(dx, 2.2, 0));
       this.mergeInstead(post, postGeoms);
     }
-    const chargeSign = new THREE.Mesh(
-      new THREE.BoxGeometry(1.8, 0.9, 0.1),
-      new THREE.MeshBasicMaterial({ map: signTexture('充电', 'CHARGE') }),
-    );
-    chargeSign.position.copy(at([-2, -2], 2.2));
-    this.scene.add(chargeSign);
 
     for (const [color, geoms] of containersByColor) this.addMerged(geoms, toonMaterial(color), { outline: 0.06 });
     this.addMerged(steelGeoms, toonMaterial(0x5f6a70));
@@ -1755,7 +1749,8 @@ function pointsOf(geometry) {
 }
 
 /** A painted sign board: Chinese title over a latin caption, on dark teal with a glowing frame. */
-function signTexture(title, caption) {
+/** A painted board: big Chinese title over an English caption, in the Yard's teal-on-slate. */
+export function signTexture(title, caption) {
   const canvas = document.createElement('canvas');
   canvas.width = 512;
   canvas.height = 256;

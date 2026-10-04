@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { toonMesh, toonMaterial } from './toon.js';
+import { signTexture } from './TestTrack.js';
 
 const MAST_HEIGHT = 15;
 const CROWN_RADIUS = 1.8;
@@ -10,6 +11,8 @@ const BEAM_HEIGHT = 1400;
 const SHOCKWAVE_SECONDS = 2.2;
 const SHOCKWAVE_REACH = 260;      // m the light ring races out across the ground
 const DORMANT_PULSE_PERIOD = 2.4; // seconds
+const SIGN_DISTANCE = 0.6;  // fraction of the way from plate to mast where the charge sign stands
+const SIGN_DARK = 0x3a3a3a;  // a dead relay's sign, unlit
 const RUST = 0x5a4a44;
 const IRON = 0x34393d;
 const LIVE = 0x5ff0e0;
@@ -33,6 +36,7 @@ export class Relay {
   plateGlow;
   beam;
   shockwave;
+  sign;                  // 充电 CHARGE: lit while the relay is, so a charging plate reads from afar
   shockwaveAge = Infinity;
 
   constructor(definition, station, towerOffset, world) {
@@ -44,6 +48,7 @@ export class Relay {
     this.buildPlate();
     this.buildBeam(tower);
     this.buildShockwave();
+    this.buildSign(tower);
     // The mast is solid: drive into it and you stop.
     world.createCollider(RAPIER.ColliderDesc.cylinder(MAST_HEIGHT / 2, 0.9)
       .setTranslation(tower.x, tower.y + MAST_HEIGHT / 2, tower.z));
@@ -58,6 +63,7 @@ export class Relay {
     this.state = state;
     this.beam.visible = state === 'lit';
     this.plateGlow.visible = state === 'lit';
+    this.sign.material.color.set(state === 'lit' ? 0xffffff : SIGN_DARK);
     const color = state === 'lit' ? LIVE : state === 'waiting' ? WAITING : IRON;
     this.crown.material.color.set(color);
     this.crown.material.emissive.set(state === 'dark' ? 0x000000 : color);
@@ -150,6 +156,20 @@ export class Relay {
     this.group.add(this.beam);
   }
 
+  /** A charge sign on a post between plate and mast, facing whoever drives up to the plate. */
+  buildSign(tower) {
+    chargeSignTexture ??= signTexture('充电', 'CHARGE');
+    const at = this.station.clone().lerp(tower, SIGN_DISTANCE);
+    this.sign = new THREE.Mesh(new THREE.BoxGeometry(2.2, 1.1, 0.12), new THREE.MeshBasicMaterial({ map: chargeSignTexture }));
+    this.sign.position.set(at.x, at.y + 3.2, at.z);
+    this.sign.lookAt(this.station.x, at.y + 3.2, this.station.z);
+    this.sign.userData.dynamic = true;
+    this.group.add(this.sign);
+    const post = toonMesh(new THREE.CylinderGeometry(0.08, 0.1, 2.7, 6), IRON, { outline: 0.02 });
+    post.position.set(at.x, at.y + 1.35, at.z);
+    this.group.add(post);
+  }
+
   buildShockwave() {
     this.shockwave = new THREE.Mesh(
       new THREE.RingGeometry(0.85, 1, 64).rotateX(-Math.PI / 2),
@@ -161,6 +181,9 @@ export class Relay {
     this.group.add(this.shockwave);
   }
 }
+
+// One painted board shared by every relay's sign; made on first use, when a canvas is sure to exist.
+let chargeSignTexture = null;
 
 /** The light-column shader, shared by relay beams and the Spire's beam. */
 export function beamMaterial(color, brightness = 1) {

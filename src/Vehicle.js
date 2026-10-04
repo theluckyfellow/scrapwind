@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { Chassis } from './Chassis.js';
-import { Wheel } from './Wheel.js';
+import { Wheel, speedGripFactor } from './Wheel.js';
 import { Battery } from './Battery.js';
 import { Rotor } from './Rotor.js';
 import { Capacitor } from './Capacitor.js';
@@ -37,7 +37,7 @@ const UPRIGHT_ROLL_SINE = 0.3; // sin of the roll angle where the assist wakes u
 const MAX_GYROS = 3;           // more gyro stabilizers than this add nothing
 const PAD_SURGE_WATTS = 120000; // a surge pad refills each capacitor at this rate
 const PAD_BATTERY_WATTS = 30000; // and trickles the batteries too
-const RELAY_STATION_WATTS = 150000; // a lit relay's plate fills batteries fast: the grid pays back
+const RELAY_FILL_SECONDS = 12; // a lit relay's plate fills an empty pack in this long, whatever its size
 const GRAVITY = 9.81;
 const AIR_DENSITY = 1.2;       // kg/m³
 const LOCAL_UP = new THREE.Vector3(0, 1, 0);
@@ -283,6 +283,7 @@ export class Vehicle {
   chargeFraction() { return this.batteryPack.chargeFraction(); }
   powerDraw() { return this.batteryPack.powerDraw(); }
   maxPower() { return this.batteryPack.maxPower(); }
+  batteryCapacity() { return this.batteryPack.capacity(); }
   rideHeight() { return this.currentRideHeight; }
   flying() { return this.rotorsDeployed; }
   boosting() { return this.boostActive; }
@@ -400,10 +401,10 @@ export class Vehicle {
     return normal.lengthSq() > 0 ? normal.normalize() : LOCAL_UP.clone();
   }
 
-  /** A lit relay's plate: a proper charging station for batteries and capacitors alike. */
+  /** A lit relay's plate: a proper charging station for batteries and capacitors alike. Returns the Wh the batteries took. */
   chargeFromRelay(dt) {
     for (const capacitor of this.capacitors()) capacitor.chargeWith(PAD_SURGE_WATTS, dt);
-    this.batteryPack.topUp((RELAY_STATION_WATTS * dt) / 3600);
+    return this.batteryPack.topUp((this.batteryPack.capacity() * dt) / RELAY_FILL_SECONDS);
   }
 
   /** Gives charge to a relay; returns the watt-hours the batteries actually had. */
@@ -447,8 +448,8 @@ export class Vehicle {
   gripLimitedSteerAngle(speed, reach, wheels) {
     const gripping = wheels.filter(wheel => wheel.touchingGround());
     const grip = gripping.length
-      ? gripping.reduce((sum, wheel) => sum + wheel.gripEstimate(), 0) / gripping.length
-      : this.tyreGripAverage;
+      ? gripping.reduce((sum, wheel) => sum + wheel.gripEstimate(speed), 0) / gripping.length
+      : this.tyreGripAverage * speedGripFactor(speed);
     const aeroDownforce = 0.5 * AIR_DENSITY * speed * speed * this.chassis.downforceArea();
     const aeroGrip = (aeroDownforce / this.chassis.mass()) * grip;
     // Assisted driving never asks the tyres for more than they have; advanced leaves a margin to play with.

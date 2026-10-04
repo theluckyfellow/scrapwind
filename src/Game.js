@@ -205,9 +205,12 @@ export class Game {
     this.sound.update(this.vehicle, frameSeconds);
     this.telemetry.update(this.vehicle, this.controls, frameSeconds);
     this.grid.update(this.elapsedSeconds, frameSeconds, this.vehicle);
-    this.gridCompass.update(this.grid, this.camera, position, frameSeconds);
+    this.gridCompass.update(this.grid, this.camera, this.vehicle, frameSeconds);
+    // The hum rises as a relay fills, or as your batteries do on a lit plate.
     const feeding = this.grid.chargingRelay;
-    this.sound.relayHum(feeding ? this.grid.delivered(feeding) / feeding.definition.cost : null);
+    const hum = feeding ? this.grid.delivered(feeding) / feeding.definition.cost
+      : this.grid.stationRelay ? this.vehicle.chargeFraction() : null;
+    this.sound.relayHum(hum);
     this.postfx.target(this.scene, this.camera);
     this.postfx.updateSun(this.camera);
     this.postfx.render();

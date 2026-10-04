@@ -16,6 +16,7 @@ export const wheelTuning = {
   slidingSlipRatio: 0.85,     // fully sliding forward beyond this
   wheelInertiaScale: 1.4,     // tyre plus hub motor rotational inertia
   camberThrust: 0.6,          // sideways push per newton of load, per radian of tyre lean
+  speedGrip: 1.5,             // extra grip at 40 m/s, as a multiple of the tyre's own (rising with speed²)
 };
 
 // How the suspension follows ride height: more clearance buys more travel and softer springs (and a higher
@@ -40,6 +41,7 @@ const DROOP_RATE = 3;             // m/s the wheel drops when it leaves the grou
 // A stalled motor still draws current; count power as if the tyre were rolling at least this fast.
 const MIN_POWER_SPEED = 2;        // m/s
 const TOE_DRAG = 0.2;             // rolling resistance fraction per radian of toe angle
+const SPEED_GRIP_REFERENCE = 40;  // m/s where speedGrip is measured
 
 const TYRE_COLOR = 0x2a2522;
 const MOTOR_COLOR = 0x3f8f8a;
@@ -117,11 +119,11 @@ export class Wheel extends Part {
     this.springScale = scale;
   }
 
-  /** This tyre's peak friction coefficient here and now: model × surface × load sensitivity. */
-  gripEstimate() {
-    if (!this.inContact) return this.model.grip;
+  /** This tyre's peak friction coefficient here and now, at this speed: model × surface × speed grip. */
+  gripEstimate(speed) {
+    if (!this.inContact) return this.model.grip * speedGripFactor(speed);
     const looseness = this.ground.surface.loose ? this.model.looseGrip : 1;
-    return this.model.grip * looseness * this.ground.surface.grip;
+    return this.model.grip * looseness * this.ground.surface.grip * speedGripFactor(speed);
   }
 
   /** The contact point, surface and slide state, for the dust. */
@@ -237,8 +239,6 @@ export class Wheel extends Part {
     const loadFactor = THREE.MathUtils.clamp(
       (this.restingLoad / Math.max(this.load, 1)) ** wheelTuning.loadSensitivity, 0.7, 1.3,
     );
-    const maxForce = wheelTuning.tyreGrip * this.model.grip * looseness * surface.grip * loadFactor * this.load;
-
     // The tyre's own axes, laid flat on the ground it is touching, with the alignment angles folded in.
     const up = chassis.up();
     const heading = chassis.forward().applyAxisAngle(up, -(this.steerAngle + this.toeAngle));
@@ -248,6 +248,8 @@ export class Wheel extends Part {
     const velocity = chassis.velocityAt(this.ground.point);
     const longitudinalSpeed = velocity.dot(heading);
     const lateralSpeed = velocity.dot(side);
+    const speedGrip = speedGripFactor(Math.abs(longitudinalSpeed));
+    const maxForce = wheelTuning.tyreGrip * this.model.grip * looseness * surface.grip * loadFactor * speedGrip * this.load;
     const carriedMass = this.load / GRAVITY;
 
     // Sideways: the tyre curve at speed, a direct hold against creeping when slow, and camber thrust
@@ -284,8 +286,12 @@ export class Wheel extends Part {
     const force = heading.multiplyScalar(longitudinal).addScaledVector(side, lateral);
     // Lifting the push point toward the centre of mass (along the chassis up axis only, so steering
     // leverage is untouched) trades a little realism for a vehicle that doesn't trip over its own tyres.
+    // The speed-grip share of the force is magic, not rubber: it acts at the centre of mass, so the sticky
+    // tyres of a fast build turn it harder without levering it onto its roof.
     const centerOfMass = chassis.worldCenterOfMass();
-    const lift = centerOfMass.sub(this.ground.point).dot(up) * wheelTuning.tyreForceLift;
+    const magicShare = 1 - 1 / speedGrip;
+    const liftFraction = wheelTuning.tyreForceLift + (1 - wheelTuning.tyreForceLift) * magicShare;
+    const lift = centerOfMass.sub(this.ground.point).dot(up) * liftFraction;
     const point = this.ground.point.clone().addScaledVector(up, lift);
     this.push(chassis, force, point, 'tyre');
     track.pushBack(this.ground, force, dt);
@@ -407,6 +413,14 @@ export class Wheel extends Part {
     this.strut = toonMesh(new THREE.CylinderGeometry(0.045, 0.045, 1, 6), STRUT_COLOR, { outline: 0.012 });
     this.visual.add(this.strut);
   }
+}
+
+/**
+ * How much more grip a tyre has at this speed (1 at a standstill). The arcade's sticky tyres, F-Zero style:
+ * real rubber would hold a 144 km/h car to a turn a city block wide, which feels like steering a boat.
+ */
+export function speedGripFactor(speed) {
+  return 1 + wheelTuning.speedGrip * (speed / SPEED_GRIP_REFERENCE) ** 2;
 }
 
 /** Sideways grip (0..1 of peak) for a slip angle: rises to the peak, then fades toward slidingGrip. */

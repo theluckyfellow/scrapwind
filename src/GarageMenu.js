@@ -345,9 +345,9 @@ export class GarageMenu {
     const total = this.grid.total();
     this.gridLine.textContent = this.grid.finished()
       ? `All ${total} relays awake. The valley remembers.`
-      : lit === 0
-        ? `Every relay in the valley is dead. Drive charge to the one by the Yard to start.`
-        : `${lit} of ${total} relays awake. Wake them all and the Spire answers.`;
+      : lit <= 1
+        ? `Only the Yard's relay is alive: charge up on its plate, then carry power out to the dead ones (amber on the compass).`
+        : `${lit} of ${total} relays awake. Wake them all and the Spire answers. Any awake relay's plate charges you.`;
   }
 
   /** Two clicks within a few seconds, so a stray one can't wipe an evening's work. */

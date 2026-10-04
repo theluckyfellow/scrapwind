@@ -484,7 +484,7 @@ input.hidden {
 
 .toasts {
   position: fixed;
-  top: 74px;
+  top: 108px;
   left: 50%;
   z-index: 40;
   display: grid;
@@ -908,6 +908,44 @@ input.hidden {
 
 .grid-marker.lit {
   opacity: 0.9;
+}
+
+.grid-marker.recharge {
+  opacity: 1;
+  z-index: 3;
+}
+
+.grid-marker.recharge .grid-diamond {
+  background: #5ff0e0;
+  box-shadow: 0 0 14px #5ff0e0;
+  animation: grid-pulse 1s ease-in-out infinite;
+}
+
+.grid-marker.recharge .grid-marker-label::after {
+  content: ' ⚡';
+}
+
+.grid-low-charge {
+  position: absolute;
+  top: 66px;
+  left: 50%;
+  max-width: min(640px, calc(100vw - 40px));
+  padding: 5px 14px;
+  font-size: 13px;
+  color: var(--ink);
+  background: #5ff0e0;
+  border: 3px solid var(--ink);
+  border-radius: 8px;
+  transform: translateX(-50%) skewX(-6deg);
+  animation: low-charge 1.6s ease-in-out infinite;
+}
+
+.grid-low-charge.hidden {
+  display: none;
+}
+
+@keyframes low-charge {
+  50% { box-shadow: 0 0 18px #5ff0e0; }
 }
 
 .grid-marker.lit .grid-diamond {

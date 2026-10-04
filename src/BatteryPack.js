@@ -57,9 +57,11 @@ export class BatteryPack {
     return before - this.charge();
   }
 
-  /** Tops the pack up from outside (a surge pad on the track), in watt-hours. */
+  /** Tops the pack up from outside (a surge pad, a relay's plate), in watt-hours; returns what fitted. */
   topUp(wattHours) {
+    const before = this.charge();
     this.spread(-wattHours);
+    return this.charge() - before;
   }
 
   /** Ends the step: drains the batteries for the power used, plus the auxiliary losses. */

@@ -5,13 +5,14 @@ import { ChargeSpark } from './ChargeSpark.js';
 import { readStored, writeStored } from './storage.js';
 import { mergeStaticMeshes } from './toon.js';
 
-// The old grid: thirteen relays across the valley, linked as a tree from home. Each costs charge to
-// wake (watt-hours drained from the vehicle parked on its plate). A relay can only be woken once a
+// The old grid: thirteen relays across the valley, linked as a tree from home. The Yard's relay is the
+// one the village kept alive (`awake`): its plate is where everyone charges. Every other relay costs
+// charge to wake (watt-hours drained from the vehicle parked on its plate), and can only be woken once a
 // linked neighbour is lit, because power has to come from somewhere; the Spire needs all the others.
 // Sites are named landmarks the TestTrack knows; `perch` relays sit on top of something (a mesa) and
 // are meant to be reached by air.
 const RELAYS = [
-  { id: 'yard', title: '拾风站', name: 'Yard Relay', cost: 300, site: track => offset(track.landmark('settlement'), -6, -34), links: ['watcher', 'needle', 'marbles', 'salt', 'road', 'dunes'] },
+  { id: 'yard', title: '拾风站', name: 'Yard Relay', awake: true, site: track => offset(track.landmark('settlement'), -6, -34), links: ['watcher', 'needle', 'marbles', 'salt', 'road', 'dunes'] },
   { id: 'watcher', title: '望台', name: "Watcher's Crown", cost: 600, perch: true, site: track => track.landmark('watcherMesa'), links: ['yard'] },
   { id: 'needle', title: '针峰', name: 'The Needle', cost: 700, perch: true, site: track => track.landmark('needleMesa'), links: ['yard'] },
   { id: 'marbles', title: '石珠', name: 'Marble Meadow', cost: 500, site: track => offset(track.landmark('marbles'), -60, -90), links: ['yard'] },
@@ -28,7 +29,7 @@ const RELAYS = [
 
 const STORAGE_KEY = 'scrapwind-grid';
 const PARK_SPEED = 2.5;            // m/s; a relay only takes charge from a vehicle that has stopped on its plate
-const CHARGE_WATTS = 150000;       // the most a relay drinks from a vehicle (less if the batteries can't give it)
+const FEED_SECONDS = 9;            // a relay drinks its whole cost in about this long, however big it is
 const NEAR_DISTANCE = 70;          // m; inside this the HUD shows the relay's panel
 const BLOOM_RADIUS = 240;          // m the land greens around a lit relay...
 const BLOOM_SECONDS = 24;          // ...spreading out over this long
@@ -56,6 +57,8 @@ export class Grid {
   blooms = [];               // [{ relay, age, radius }] in light order: one terrain bloom slot each
   chargingRelay = null;      // the relay taking charge this step, for the spark and the hum
   chargeRate = 0;            // 0..1 of full charging speed this step
+  stationRelay = null;       // the lit relay charging the vehicle this step
+  stationWatts = 0;          // how fast it is charging the vehicle
   finishedAt = null;
   spireBeam = null;
   awakening = 0;             // 0..1, eases up after the Spire wakes
@@ -90,7 +93,6 @@ export class Grid {
   canLight(relay) {
     if (relay.isLit()) return false;
     if (relay.definition.finale) return this.relays.every(other => other === relay || other.isLit());
-    if (relay.id() === 'yard') return true;
     return relay.definition.links.some(id => this.byId.get(id)?.isLit());
   }
 
@@ -106,17 +108,23 @@ export class Grid {
   charge(vehicle, dt) {
     this.chargingRelay = null;
     this.chargeRate = 0;
+    this.stationRelay = null;
+    this.stationWatts = 0;
     const position = vehicle.drawnPosition();
     const relay = this.relays.find(candidate => candidate.covers(position));
     if (!relay) return null;
     if (relay.isLit()) {
-      vehicle.chargeFromRelay(dt);
+      const added = vehicle.chargeFromRelay(dt);
+      if (added > 0) {
+        this.stationRelay = relay;
+        this.stationWatts = (added * 3600) / dt;
+      }
       return { kind: 'station', relay };
     }
     if (!this.canLight(relay)) return { kind: 'locked', relay };
     if (vehicle.speed() > PARK_SPEED) return { kind: 'moving', relay };
     const wanted = relay.definition.cost - this.delivered(relay);
-    const watts = Math.min(CHARGE_WATTS, vehicle.maxPower());
+    const watts = (relay.definition.cost * 3600) / FEED_SECONDS;
     const given = vehicle.dischargeInto(Math.min((watts * dt) / 3600, wanted));
     if (given <= 0) return { kind: 'empty', relay };
     this.progress[relay.id()] = this.delivered(relay) + given;
@@ -132,7 +140,7 @@ export class Grid {
     const relay = this.byId.get(id);
     if (!relay || relay.isLit()) return false;
     relay.setState('lit');
-    this.progress[id] = relay.definition.cost;
+    this.progress[id] = relay.definition.cost ?? 0;
     for (const neighbourId of relay.definition.links) {
       const neighbour = this.byId.get(neighbourId);
       if (neighbour?.isLit()) this.connect(neighbour, relay, quiet);
@@ -166,6 +174,7 @@ export class Grid {
     this.track.clearBlooms();
     this.track.awakenSpire(0);
     this.sky.setAwakening(0);
+    this.lightAwakeRelays();
     this.save();
   }
 
@@ -184,8 +193,21 @@ export class Grid {
       delivered: this.delivered(best.relay),
       cost: best.relay.definition.cost,
       charging: best.relay === this.chargingRelay,
+      onPlate: best.relay.covers(position),
+      stationWatts: best.relay === this.stationRelay ? this.stationWatts : 0,
       litNeeded: best.relay.definition.finale ? this.total() - 1 - this.litCount() : 0,
     };
+  }
+
+  /** The nearest lit relay, where a vehicle running low can charge; null if none is lit. */
+  nearestCharger(position) {
+    let best = null;
+    for (const relay of this.relays) {
+      if (!relay.isLit()) continue;
+      const distance = Math.hypot(position.x - relay.station.x, position.z - relay.station.z);
+      if (!best || distance < best.distance) best = { relay, distance };
+    }
+    return best;
   }
 
   /** Animates relays, arcs, blooms, the charging spark and the finale; Game calls this every frame. */
@@ -228,15 +250,16 @@ export class Grid {
     this.group.add(arc.mesh);
   }
 
-  /** The spark from the vehicle's roof to the crown of the relay it is feeding. */
+  /** The spark between the vehicle's roof and a crown: up into a relay it feeds, or down from one charging it. */
   updateSpark(vehicle) {
-    const relay = this.chargingRelay;
+    const relay = this.chargingRelay ?? this.stationRelay;
     if (!relay || !vehicle) {
       this.spark.hide();
       return;
     }
     const roof = vehicle.drawnPosition().add(new THREE.Vector3(0, SPARK_ROOF_HEIGHT, 0));
-    this.spark.show(roof, relay.crownTop, this.chargeRate);
+    if (relay === this.chargingRelay) this.spark.show(roof, relay.crownTop, this.chargeRate);
+    else this.spark.show(relay.crownTop, roof, 1);
   }
 
   /** The finale: the Spire's crown flares and fires a beam at the moon; the sky answers. */
@@ -289,8 +312,16 @@ export class Grid {
     return this.track.heightAt(x, z) - this.track.groundHeight(x, z) < CLEAR_GROUND;
   }
 
+  /** Relays that are awake from the start; called on load and reset, before anything else is lit. */
+  lightAwakeRelays() {
+    for (const relay of this.relays) {
+      if (relay.definition.awake) this.light(relay.id(), { quiet: true });
+    }
+  }
+
   load() {
-    const saved = readStored(STORAGE_KEY, null);
+    const saved = readStored(STORAGE_KEY, null); // read before lighting anything: light() saves
+    this.lightAwakeRelays();
     if (!saved || typeof saved !== 'object') {
       this.refreshStates();
       return;
