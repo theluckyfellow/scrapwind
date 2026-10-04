@@ -2,6 +2,7 @@ import { BODIES, WHEELS, BATTERIES, BOOSTERS, ROTORS, BALLASTS, GYROS, PANEL_SLO
 import { Blueprint, TUNING_RANGES } from './Blueprint.js';
 import { PRESETS } from './presets.js';
 import { element, button, downloadText } from './dom.js';
+import * as api from './api.js';
 
 const SAVED_DESIGNS_KEY = 'scrapwind-designs';
 const ARM_SECONDS = 3;     // a body switch that would clear parts waits this long for a second click
@@ -58,6 +59,8 @@ export class GarageMenu {
   root;
   garage;
   onTestDrive;
+  net;
+  serverDesigns = [];
   bodyButtons = new Map();
   toolButtons = [];          // [{ node, part, modelKey }]
   paintSwatches = [];
@@ -78,9 +81,10 @@ export class GarageMenu {
   designSelect;
   importInput;
 
-  constructor(parent, garage, onTestDrive) {
+  constructor(parent, garage, onTestDrive, net = null) {
     this.garage = garage;
     this.onTestDrive = onTestDrive;
+    this.net = net;
     this.root = element('div', 'garage-menu', parent);
     this.buildBuildPanel(element('div', 'garage-panel garage-left', this.root));
     this.buildDesignPanel(element('div', 'garage-panel garage-right', this.root));
@@ -123,6 +127,7 @@ export class GarageMenu {
     for (const [key, select] of this.controlSelects) select.value = blueprint.controls[key];
     this.mirrorBox.checked = this.garage.mirroring();
     this.rotorsBox.checked = this.garage.showingRotorsOut();
+    this.refreshMultiplayer();
 
     const stats = blueprint.stats();
     this.statCells.forEach(([cell, format]) => { cell.textContent = format(stats); });
@@ -237,6 +242,8 @@ export class GarageMenu {
     }
     this.warningList = element('ul', 'garage-warnings', panel);
 
+    this.buildMultiplayerPanel(panel);
+
     element('div', 'garage-heading', panel, 'Designs');
     const designs = element('div', 'garage-designs', panel);
     this.designSelect = element('select', '', designs);
@@ -269,6 +276,115 @@ export class GarageMenu {
     return { slider, readout };
   }
 
+  /** Rooms and accounts: join by code, and signed-in designs that follow you between machines. */
+  buildMultiplayerPanel(panel) {
+    element('div', 'garage-heading', panel, 'Multiplayer');
+    const box = element('div', 'garage-multiplayer', panel);
+    this.mpStatusLine = element('div', 'mp-status', box);
+    const roomRow = element('div', 'garage-designs', box);
+    this.mpRoomCode = element('span', 'mp-code', roomRow, '—');
+    button('', roomRow, 'Copy code', () => {
+      if (this.net?.room) navigator.clipboard?.writeText(this.net.room).catch(() => {});
+    });
+    const actions = element('div', 'garage-designs', box);
+    button('', actions, 'New room', () => {
+      this.net?.createRoom();
+      this.setHint('Room made — share the code with your friends.');
+    });
+    this.mpJoinInput = element('input', '', actions);
+    Object.assign(this.mpJoinInput, { placeholder: 'CODE', maxLength: 5 });
+    this.mpJoinInput.style.width = '6em';
+    this.mpJoinInput.style.textTransform = 'uppercase';
+    button('', actions, 'Join', () => {
+      const code = this.mpJoinInput.value.trim().toUpperCase();
+      if (code.length !== 5) return this.setHint('Room codes are five characters.');
+      this.net?.joinRoom(code);
+      this.setHint('Joining…');
+    });
+    button('', actions, 'Leave', () => this.net?.leaveRoom());
+    this.mpPlayers = element('ul', 'mp-players', box);
+    element('div', 'garage-note', panel, 'Test drive, share the code, and friends drive the same desert. Bump gently.');
+    this.refreshMultiplayer();
+
+    element('div', 'garage-heading', panel, 'Account');
+    const account = element('div', 'garage-designs', panel);
+    this.accountLine = element('span', 'mp-status', account);
+    this.accountNameInput = element('input', '', account);
+    Object.assign(this.accountNameInput, { placeholder: 'name', maxLength: 24 });
+    this.accountPasswordInput = element('input', '', account);
+    Object.assign(this.accountPasswordInput, { placeholder: 'password', type: 'password' });
+    this.accountButton = button('', account, 'Enter', () => this.handleAccount());
+    this.refreshAccount();
+    this.reloadServerDesigns();
+  }
+
+  refreshMultiplayer() {
+    if (!this.mpStatusLine) return;
+    const net = this.net;
+    if (!net || net.status !== 'online') {
+      this.mpStatusLine.textContent = net?.status === 'connecting' ? 'Connecting…' : 'Multiplayer offline.';
+    } else {
+      this.mpStatusLine.textContent = net.room ? `In room ${net.room}` : 'Connected. Make or join a room.';
+    }
+    this.mpRoomCode.textContent = net?.room ?? '—';
+    const names = net ? [...net.players.values()].map(player => player.name) : [];
+    this.mpPlayers.replaceChildren(...names.map(name => element('li', '', null, name)));
+  }
+
+  refreshAccount() {
+    if (!this.accountLine) return;
+    if (api.signedIn()) {
+      this.accountLine.textContent = `Signed in as ${api.userName()}`;
+      this.accountButton.textContent = 'Sign out';
+      this.accountNameInput.classList.add('hidden');
+      this.accountPasswordInput.classList.add('hidden');
+    } else {
+      this.accountLine.textContent = 'Sign in to keep your designs in the cloud.';
+      this.accountButton.textContent = 'Enter';
+      this.accountNameInput.classList.remove('hidden');
+      this.accountPasswordInput.classList.remove('hidden');
+    }
+  }
+
+  /** Signs in, or registers the account when the name is new; one door, both directions. */
+  async handleAccount() {
+    if (api.signedIn()) {
+      await api.signOut();
+      this.serverDesigns = [];
+      this.fillDesignList();
+      this.refreshAccount();
+      this.setHint('Signed out. Designs save to this browser again.');
+      return;
+    }
+    const name = this.accountNameInput.value.trim();
+    const password = this.accountPasswordInput.value;
+    if (!name || !password) return this.setHint('Give a name and a password.');
+    this.accountButton.disabled = true;
+    try {
+      const signed = await api.signIn(name, password);
+      this.accountPasswordInput.value = '';
+      if (this.net) this.net.name = signed;
+      this.setHint(`Signed in as ${signed}. Designs save to your account.`);
+    } catch (error) {
+      this.setHint(error.message);
+    } finally {
+      this.accountButton.disabled = false;
+      this.refreshAccount();
+      this.reloadServerDesigns();
+    }
+  }
+
+  /** Pulls the signed-in player's designs from the server; silent when signed out. */
+  async reloadServerDesigns() {
+    if (!api.signedIn()) return;
+    try {
+      this.serverDesigns = await api.listDesigns();
+      this.fillDesignList();
+    } catch {
+      // The cloud list can wait; local designs still load.
+    }
+  }
+
   /** Applies an edit to the design and, unless it only changed a label, rebuilds the preview. */
   edit(change, rebuild = true) {
     change(this.garage.blueprint);
@@ -298,6 +414,7 @@ export class GarageMenu {
     const options = [
       ...Object.entries(PRESETS).map(([key, preset]) => ({ value: `preset:${key}`, label: `Starter: ${preset.name}` })),
       ...Object.keys(savedDesigns()).map(name => ({ value: `saved:${name}`, label: name })),
+      ...this.serverDesigns.map(design => ({ value: `cloud:${design.name}`, label: `${design.name} · cloud` })),
     ];
     this.designSelect.replaceChildren(...options.map(({ value, label }) => {
       const option = element('option', '', null, label);
@@ -308,17 +425,29 @@ export class GarageMenu {
 
   loadSelected() {
     const [kind, key] = splitOnce(this.designSelect.value, ':');
-    const json = kind === 'preset' ? PRESETS[key] : savedDesigns()[key];
+    const json = kind === 'preset' ? PRESETS[key]
+      : kind === 'cloud' ? this.serverDesigns.find(design => design.name === key)?.json
+      : savedDesigns()[key];
     if (json) this.garage.setBlueprint(Blueprint.fromJSON(json));
   }
 
-  saveCurrent() {
-    const designs = savedDesigns();
+  async saveCurrent() {
     const blueprint = this.garage.blueprint;
+    const designs = savedDesigns();
     designs[blueprint.name] = blueprint.toJSON();
     storeDesigns(designs);
     this.fillDesignList();
     this.designSelect.value = `saved:${blueprint.name}`;
+    if (api.signedIn()) {
+      try {
+        await api.saveDesign(blueprint.name, blueprint.toJSON());
+        this.setHint(`Saved "${blueprint.name}" here and to your account.`);
+        await this.reloadServerDesigns();
+      } catch (error) {
+        this.setHint(`Saved locally, but the cloud said: ${error.message}`);
+      }
+      return;
+    }
     this.setHint(`Saved "${blueprint.name}".`);
   }
 

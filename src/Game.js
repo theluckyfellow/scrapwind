@@ -16,6 +16,8 @@ import { PostFX } from './PostFX.js';
 import { Dust } from './Dust.js';
 import { Haze } from './Haze.js';
 import { Sound } from './Sound.js';
+import { Net } from './Net.js';
+import * as api from './api.js';
 import { Garage } from './Garage.js';
 import { GarageMenu } from './GarageMenu.js';
 import { ChaseCamera, cameraTuning } from './ChaseCamera.js';
@@ -31,6 +33,9 @@ const CAMERA_FAR = 6500;
 const MAX_PIXEL_RATIO = 1.75; // a 4K screen at full ratio quadruples the post-processing cost for little gain
 const LAST_DESIGN_KEY = 'scrapwind-last-design';
 const ZERO = new THREE.Vector3();
+const SPAWN_SLOT_SPACING = 4;     // m between drivers' spawn slots along the start pad
+const REMOTE_SMOOTHING = 12;      // 1/s; how fast puppets chase their driver's latest pose
+const NAME_TAG_LIFT = 2.6;        // m above a puppet's roof
 
 // One-shot buttons while driving, and what they do.
 const DRIVING_ACTIONS = {
@@ -66,6 +71,8 @@ export class Game {
   chaseCamera;
   telemetry;
   tuningPanel;
+  net;
+  remotes = new Map();           // playerId → { vehicle, tag, target { pos, quaternion, speed, flying } }
   elapsedSeconds = 0;
 
   constructor(canvas, hudElement, physicsStepSeconds) {
@@ -91,7 +98,25 @@ export class Game {
       onChange: () => this.garageMenu?.refresh(),
       onHint: text => this.garageMenu?.setHint(text),
     });
-    this.garageMenu = new GarageMenu(document.body, this.garage, blueprint => this.startDrive(blueprint));
+    this.net = new Net(localStorage.getItem('scrapwind-user') ?? 'Drifter', {
+      onRoster: (code, players) => this.syncRemotes(code, players),
+      onLeft: id => this.removeRemote(id),
+      onState: (id, state) => {
+        const remote = this.remotes.get(id);
+        if (remote) {
+          remote.target.pos.set(...state.pos);
+          remote.target.quaternion.set(...state.quaternion);
+          remote.target.speed = state.speed;
+          remote.target.flying = state.flying;
+          remote.target.boosting = state.boosting;
+        }
+      },
+      onDesign: id => this.refreshRemoteDesign(id),
+      onStatus: () => this.garageMenu?.refreshMultiplayer(),
+      onNotice: text => this.garageMenu?.setHint(text),
+    });
+    this.net.connect();
+    this.garageMenu = new GarageMenu(document.body, this.garage, blueprint => this.startDrive(blueprint), this.net);
     this.tuningPanel = new TuningPanel([
       { title: 'Chassis', record: chassisTuning, onChange: () => this.vehicle?.applyMassTuning() },
       { title: 'Suspension and tyres', record: wheelTuning, onChange: () => this.vehicle?.refitSuspension() },
@@ -166,6 +191,113 @@ export class Game {
     this.postfx.target(this.scene, this.camera);
     this.postfx.updateSun(this.camera);
     this.postfx.render();
+    this.net.sendState(this.vehicle, frameSeconds);
+    this.updateRemotes(frameSeconds);
+  }
+
+  // ---- Multiplayer puppets ----
+
+  /** Rebuilds the puppet fleet to match the room's roster; designs come with the roster. */
+  syncRemotes(code, players) {
+    if (code === null) {
+      for (const id of [...this.remotes.keys()]) this.removeRemote(id);
+      this.garageMenu?.refreshMultiplayer();
+      return;
+    }
+    const wanted = new Set();
+    for (const entry of players) {
+      if (entry.id === this.net.myId || !entry.design) continue;
+      wanted.add(entry.id);
+      if (!this.remotes.has(entry.id)) this.spawnRemote(entry);
+    }
+    for (const id of [...this.remotes.keys()]) {
+      if (!wanted.has(id)) this.removeRemote(id);
+    }
+    this.garageMenu?.refreshMultiplayer();
+  }
+
+  /** A puppet: the real Vehicle visuals over a kinematic body, driven by its owner's pose stream. */
+  spawnRemote(entry) {
+    const slot = entry.slot ?? 0;
+    const spawn = SPAWN_GROUND.clone().add(new THREE.Vector3(slot * SPAWN_SLOT_SPACING, 0, 0));
+    const vehicle = new Vehicle(this.world, Blueprint.fromJSON(entry.design), spawn, SPAWN_HEADING);
+    vehicle.showAtRest(spawn);
+    vehicle.chassis.body.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true);
+    this.scene.add(vehicle.visual());
+    this.remotes.set(entry.id, {
+      vehicle,
+      tag: this.makeNameTag(entry.name),
+      target: {
+        pos: spawn.clone(),
+        quaternion: new THREE.Quaternion(),
+        speed: 0,
+        flying: false,
+        boosting: false,
+      },
+      rotorsShown: false,
+    });
+  }
+
+  removeRemote(id) {
+    const remote = this.remotes.get(id);
+    if (!remote) return;
+    remote.vehicle.dispose(this.world);
+    remote.vehicle.visual().removeFromParent();
+    remote.tag.removeFromParent();
+    this.remotes.delete(id);
+    this.garageMenu?.refreshMultiplayer();
+  }
+
+  /** Redraws a puppet when its owner re-sent their design (they rebuilt in the garage). */
+  refreshRemoteDesign(id) {
+    const entry = this.net.players.get(id);
+    if (entry?.design && this.remotes.has(id)) {
+      this.removeRemote(id);
+      this.spawnRemote(entry);
+    }
+  }
+
+  /** Chases each puppet's latest received pose with exponential smoothing, then draws it. */
+  updateRemotes(frameSeconds) {
+    const alpha = 1 - Math.exp(-REMOTE_SMOOTHING * frameSeconds);
+    for (const remote of this.remotes.values()) {
+      const { vehicle, target } = remote;
+      const position = vehicle.drawnPosition();
+      position.lerp(target.pos, alpha);
+      const quaternion = vehicle.drawnQuaternion().slerp(target.quaternion, alpha);
+      vehicle.chassis.placeAt(position, quaternion);
+      vehicle.updateVisual(1, frameSeconds);
+      for (const wheel of vehicle.wheels()) {
+        wheel.spinSpeed = target.speed / wheel.model.radius;
+      }
+      if (target.flying !== remote.rotorsShown) {
+        remote.rotorsShown = target.flying;
+        for (const rotor of vehicle.rotors()) rotor.setDeployed(target.flying);
+      }
+      remote.tag.position.copy(position).add(new THREE.Vector3(0, NAME_TAG_LIFT, 0));
+    }
+  }
+
+  /** A floating name plate over another driver's build. */
+  makeNameTag(name) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 64;
+    const context = canvas.getContext('2d');
+    context.fillStyle = 'rgba(22, 38, 44, 0.85)';
+    context.fillRect(0, 0, 256, 64);
+    context.fillStyle = '#7fe8d8';
+    context.font = 'bold 34px sans-serif';
+    context.textAlign = 'center';
+    context.textBaseline = 'middle';
+    context.fillText(name.slice(0, 20), 128, 34);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, depthTest: false }));
+    sprite.scale.set(2.4, 0.6, 1);
+    sprite.renderOrder = 5;
+    this.scene.add(sprite);
+    return sprite;
   }
 
   /** Feeds the dust: tyre billows, the rotor downwash ring when flying low, capacitor sparks on boost. */
@@ -187,10 +319,12 @@ export class Game {
     this.dust.update(frameSeconds);
   }
 
-  /** Builds the design as a real vehicle on the start pad and hands over the controls. */
+  /** Builds the design as a real vehicle on the start pad (offset by room slot) and hands over the controls. */
   startDrive(blueprint) {
     if (this.vehicle) this.vehicle.dispose(this.world);
-    this.vehicle = new Vehicle(this.world, blueprint.clone(), SPAWN_GROUND, SPAWN_HEADING);
+    const slot = this.net.room !== null ? this.net.mySlot : 0;
+    const spawn = SPAWN_GROUND.clone().add(new THREE.Vector3(slot * SPAWN_SLOT_SPACING, 0, 0));
+    this.vehicle = new Vehicle(this.world, blueprint.clone(), spawn, SPAWN_HEADING);
     this.scene.add(this.vehicle.visual());
     storeLastDesign(blueprint);
     this.mode = 'drive';
@@ -198,6 +332,7 @@ export class Game {
     this.garageMenu.hide();
     this.telemetry.setVisible(true);
     this.chaseCamera.reset();
+    this.net.sendDesign(blueprint.toJSON()); // so everyone else's puppet of you is current
   }
 
   /** Back to the workshop; the vehicle on the track is taken away. */

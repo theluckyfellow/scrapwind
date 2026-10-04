@@ -288,10 +288,12 @@ export class Blueprint {
       if (stats.rotorCount < 3 || !stats.rotorSpread) warnings.push('Rotors need spreading front-to-back and side-to-side to fly level.');
       if (stats.lift < 1.15) warnings.push(`Rotors can't lift this: thrust is ${Math.round(stats.lift * 100)}% of the weight.`);
       else if (stats.hoverPower > stats.batteryPower) {
-        warnings.push(`Batteries can't power a hover: it needs ${kilowatts(stats.hoverPower)} kW, they give ${kilowatts(stats.batteryPower)} kW.`);
+        // With the flight drain, hovering usually costs more than the pack supplies: possible, but brief.
+        warnings.push(`Hovering draws ${kilowatts(stats.hoverPower)} kW (rotor heat included) and the batteries give ${kilowatts(stats.batteryPower)} kW — expect short hops, not cruises.`);
       }
     }
     if (stats.wheelCount >= 3) {
+      const wheels = this.placedParts().filter(item => item.part === 'wheel');
       if (stats.gripBalance < -0.07) warnings.push('Will understeer: the front slides first. Move weight forward, or fit grippier front tyres.');
       if (stats.gripBalance > 0.07) warnings.push('Will oversteer: the rear slides first. Move weight back, or fit grippier rear tyres.');
       if (stats.rolloverFactor < 1.05) warnings.push('Narrow and tall: it will roll in hard corners. Set the wheels wider or mount heavy parts lower.');

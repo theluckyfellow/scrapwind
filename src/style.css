@@ -469,3 +469,13 @@ input.hidden {
   pointer-events: none;
 }
 .pad-flash.active { opacity: 1; }
+
+/* Multiplayer and account rows in the garage. */
+.garage-multiplayer { display: grid; gap: 6px; }
+.mp-status { font-size: 13px; color: #9fb8b0; }
+.mp-code { font-weight: bold; letter-spacing: 0.25em; color: #7fe8d8; margin-right: 8px; }
+.mp-players { margin: 2px 0 0; padding-left: 18px; font-size: 13px; color: #cfe3dc; }
+.garage-multiplayer input {
+  background: #1d2528; border: 1px solid #3a474c; color: #e8f4ef;
+  padding: 4px 8px; border-radius: 4px; width: 8em;
+}
