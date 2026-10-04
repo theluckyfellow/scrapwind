@@ -3,11 +3,13 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { toonMesh, toonMaterial, faceted, addOutline } from './toon.js';
+import { SUN_DIRECTION, MOON_DIRECTION, MOON_RADIUS, MOON_PALE } from './Sky.js';
 
 /** Ground types: grip multiplies the tyre's grip; rolling resistance is a fraction of the tyre's load; loose ground favours paddle and knobbly tyres. */
 export const SURFACES = {
   dirt: { name: 'Gobi gravel', grip: 1.0, rollingResistance: 0.02, color: 0xc9a06b },
   road: { name: 'Hardpan road', grip: 1.08, rollingResistance: 0.014, color: 0x8a6a44 },
+  water: { name: 'Shallow water', grip: 0.6, rollingResistance: 0.06, color: 0x8fd8d0, loose: true },
   sand: { name: 'Dune sand', grip: 0.72, rollingResistance: 0.07, color: 0xf0cf8f, loose: true },
   mud: { name: 'Oasis mud', grip: 0.45, rollingResistance: 0.1, color: 0x6e4c35, loose: true },
   salt: { name: 'Salt crust', grip: 0.95, rollingResistance: 0.015, color: 0xe8e0d0 },
@@ -33,6 +35,15 @@ const WORLD = {
 };
 const YARDANGS = { center: [-190, -160], radii: [130, 90], height: 7 };  // ridges run east–west
 const SEED = 20261003;
+
+// The still places: shallow pools that answer the sky. The Sky Listeners hear it; these remember it.
+const POOLS = [
+  { at: [1290, 360], radius: 42, stretch: 1.7, heading: 0.4 },   // the salt pan's mirror, by Salt Heart
+  { at: [58, 118], radius: 26, stretch: 1.3, heading: -0.7 },    // by the Yard Relay, for the settlement
+  { at: [-140, 96], radius: 20, stretch: 1.0, heading: 1.2 },    // out on the west gravel, alone
+  { at: [30, 645], radius: 30, stretch: 1.8, heading: 0.2 },     // a long pool in the southern meadows
+];
+const CIRRUS_COUNT = 14;
 
 // Feature layout. Positions are [x, z] in metres; the start line is at [0, 30] facing north (−Z).
 // Ramps rise toward the north, low edge at `at`, steepening from left to right.
@@ -84,7 +95,6 @@ const ROCK_COUNT = 200;
 const SHRUB_COUNT = 900;
 const MOUNTAIN_COUNT = 44;
 const SNOW_HEIGHT = 300;       // peaks taller than this wear snow
-const CLOUD_COUNT = 26;
 const CRATE_SIZE = 1.2;
 const CRATE_MASS = 40;
 const BARREL_MASS = 30;
@@ -174,7 +184,6 @@ const COLORS = {
   shrub: 0x8a8a4a,
   mountain: 0x8a4a52,
   snow: 0xf5f2ee,
-  cloud: 0xfff6ea,
   beacon: 0xff4a3a,
   tower: 0xa88a62,
   pylon: 0x5f6a70,
@@ -242,6 +251,7 @@ export class TestTrack {
     this.buildSettlement();
     this.buildFairTrack();
     this.buildFairground();
+    this.buildPools();
     this.buildBoostPads();
     this.buildProps();
     // Rapier only indexes new colliders for ray queries when the world steps: one step now (props settle
@@ -309,6 +319,9 @@ export class TestTrack {
     }
     if (this.sandfallMaterial) {
       this.sandfallMaterial.uniforms.uTime.value = elapsedSeconds;
+    }
+    if (this.poolMaterial) {
+      this.poolMaterial.uniforms.uTime.value = elapsedSeconds;
     }
     for (const pod of this.silkPods) {
       pod.group.position.copy(pod.body.translation());
@@ -774,25 +787,42 @@ export class TestTrack {
     this.addMerged(mountainGeoms, toonMaterial(COLORS.mountain), { shadows: false });
     this.addMerged(snowGeoms, toonMaterial(COLORS.snow), { shadows: false });
 
-    // Every cloud in the valley is one merged mesh: a hundred puffs, a single draw call.
-    const cloudGeoms = [];
-    for (let index = 0; index < CLOUD_COUNT; index++) {
-      const cloud = new THREE.Group();
-      const puffs = 3 + Math.floor(this.random() * 4);
-      for (let puff = 0; puff < puffs; puff++) {
-        const size = THREE.MathUtils.lerp(20, 55, this.random());
-        const mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(size, 0));
-        mesh.position.set(puff * size * 0.9, this.random() * 8, this.random() * 16);
-        mesh.scale.y = 0.5;
-        cloud.add(mesh);
-      }
+    // High cirrus only: a desert sky carries no puffy clouds. Long pale streaks, far up, feathered.
+    const cirrusMaterial = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      fog: false,
+      vertexShader: /* glsl */ `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        varying vec2 vUv;
+        void main() {
+          float along = smoothstep(0.0, 0.3, vUv.x) * (1.0 - smoothstep(0.7, 1.0, vUv.x));
+          float across = smoothstep(0.0, 0.45, vUv.y) * (1.0 - smoothstep(0.55, 1.0, vUv.y));
+          float wisps = 0.6 + 0.4 * sin(vUv.x * 34.0 + vUv.y * 9.0) * sin(vUv.x * 13.0 - 1.7);
+          float alpha = along * across * wisps * 0.34;
+          gl_FragColor = vec4(vec3(0.99, 0.95, 0.88), alpha);
+        }
+      `,
+    });
+    const cirrusGeoms = [];
+    for (let index = 0; index < CIRRUS_COUNT; index++) {
       const angle = this.random() * Math.PI * 2;
-      const distance = THREE.MathUtils.lerp(400, 2700, this.random());
-      cloud.position.set(Math.cos(angle) * distance, THREE.MathUtils.lerp(260, 460, this.random()), Math.sin(angle) * distance);
-      cloud.rotation.y = this.random() * Math.PI;
-      this.mergeTreeInstead(cloud, cloudGeoms);
+      const distance = THREE.MathUtils.lerp(700, 2600, this.random());
+      const height = THREE.MathUtils.lerp(420, 580, this.random());
+      const streak = new THREE.Mesh(new THREE.PlaneGeometry(THREE.MathUtils.lerp(280, 720, this.random()), THREE.MathUtils.lerp(22, 60, this.random())));
+      streak.position.set(Math.cos(angle) * distance, height, Math.sin(angle) * distance);
+      streak.rotation.set((this.random() - 0.5) * 0.1, angle + Math.PI / 2, (this.random() - 0.5) * 0.08);
+      streak.updateMatrixWorld(true);
+      // Baked directly (not mergeInstead): the shader reads uv, which prep() would strip.
+      cirrusGeoms.push(streak.geometry.clone().applyMatrix4(streak.matrixWorld));
     }
-    this.addMerged(cloudGeoms, toonMaterial(COLORS.cloud, { fog: false }), { shadows: false });
+    this.addMerged(cirrusGeoms, cirrusMaterial, { shadows: false });
   }
 
   /** Crates and barrels to knock over near the start. */
@@ -1565,6 +1595,138 @@ export class TestTrack {
     const matrix = new THREE.Matrix4();
     bulbs.forEach((point, index) => mesh.setMatrixAt(index, matrix.makeTranslation(point.x, point.y, point.z)));
     this.scene.add(mesh);
+  }
+
+  /**
+   * The still places: shallow pools that hold the sky. No render targets — the water answers the
+   * dome with almost the same maths, a hand mirror instead of a photograph. Ripples are a breath,
+   * not a storm. A basalt monolith stands in each one, seams faintly lit.
+   */
+  buildPools() {
+    this.poolMaterial = new THREE.ShaderMaterial({
+      transparent: true,
+      fog: true,
+      uniforms: THREE.UniformsUtils.merge([
+        THREE.UniformsLib.fog,
+        {
+          uTime: { value: 0 },
+          moonDirection: { value: MOON_DIRECTION },
+          moonRadius: { value: MOON_RADIUS },
+          moonPale: { value: new THREE.Color(MOON_PALE) },
+          sunDirection: { value: SUN_DIRECTION },
+          sunColor: { value: new THREE.Color(0xfff3d8) },
+          zenithColor: { value: new THREE.Color(0x2e6ed4) },
+          horizonColor: { value: new THREE.Color(0xffcf8e) },
+          waterTint: { value: new THREE.Color(0x6fc8bc) },
+        },
+      ]),
+      vertexShader: /* glsl */ `
+        #include <common>
+        #include <fog_pars_vertex>
+        varying vec2 vUv;
+        varying vec3 vWorld;
+        void main() {
+          vUv = uv;
+          vec4 world = modelMatrix * vec4(position, 1.0);
+          vWorld = world.xyz;
+          vec4 mvPosition = viewMatrix * world;
+          gl_Position = projectionMatrix * mvPosition;
+          #include <fog_vertex>
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        #include <common>
+        #include <fog_pars_fragment>
+        uniform float uTime;
+        uniform vec3 moonDirection;
+        uniform float moonRadius;
+        uniform vec3 moonPale;
+        uniform vec3 sunDirection;
+        uniform vec3 sunColor;
+        uniform vec3 zenithColor;
+        uniform vec3 horizonColor;
+        uniform vec3 waterTint;
+        varying vec2 vUv;
+        varying vec3 vWorld;
+
+        /** The sky the pool answers: the dome's gradient, the moon's disk, the sun's wash. */
+        vec3 skyAnswer(vec3 dir) {
+          float h = max(dir.y, 0.0);
+          vec3 color = mix(horizonColor, zenithColor, smoothstep(0.0, 0.5, h));
+          vec3 moonN = normalize(moonDirection);
+          vec3 offset = dir - moonN * dot(dir, moonN);
+          float disk = 1.0 - smoothstep(moonRadius - 0.003, moonRadius, length(offset));
+          color = mix(color, moonPale * 1.25, disk * 0.9);
+          float toMoon = max(dot(dir, moonN), 0.0);
+          color += moonPale * pow(toMoon, 24.0) * 0.18;
+          float toSun = max(dot(dir, normalize(sunDirection)), 0.0);
+          color += sunColor * pow(toSun, 8.0) * 0.12;
+          return color;
+        }
+
+        void main() {
+          vec2 p = vUv * 2.0 - 1.0;
+          float r = length(p);
+          float shore = 1.0 - smoothstep(0.72, 0.98, r);
+          // A breath of ripple tilts the mirror; the sky smears, never breaks.
+          vec3 view = normalize(vWorld - cameraPosition);
+          vec3 mirrored = reflect(view, vec3(0.0, 1.0, 0.0));
+          mirrored.y = abs(mirrored.y);
+          float ripple = sin(vWorld.x * 0.9 + uTime * 0.6) * cos(vWorld.z * 1.1 - uTime * 0.45);
+          mirrored = normalize(mirrored + vec3(ripple * 0.016, 0.0, sin(vWorld.x * 0.7 - uTime * 0.5) * 0.012));
+          vec3 color = skyAnswer(mirrored);
+          // Shallow at the shore: the tint of the ground beneath shows through.
+          color = mix(waterTint * 0.8, color, smoothstep(1.0, 0.55, r));
+          // The grid's edge: a faint teal rim where the water meets the land.
+          color += vec3(0.25, 0.9, 0.8) * pow(max(0.0, 1.0 - abs(r - 0.94) * 16.0), 2.0) * 0.45;
+          gl_FragColor = vec4(color, shore);
+          #include <fog_fragment>
+        }
+      `,
+    });
+
+    const glowMaterial = toonMaterial(COLORS.megastructureGlow, { emissive: COLORS.megastructureGlow, emissiveIntensity: 1.1 });
+    const slabMaterial = toonMaterial(COLORS.megastructure);
+    for (const pool of POOLS) {
+      const [cx, cz] = pool.at;
+      const y = terrainHeight(cx, cz) + 0.05;
+      // A wobbled blob, stretched along its heading, level as poured glass.
+      const shape = new THREE.Shape();
+      const corners = 16;
+      for (let index = 0; index <= corners; index++) {
+        const angle = (index / corners) * Math.PI * 2;
+        const wobble = 1 + Math.sin(angle * 3 + pool.heading * 7) * 0.12 + Math.sin(angle * 5 + 2) * 0.07;
+        const x = Math.cos(angle) * pool.radius * wobble;
+        const z = Math.sin(angle) * pool.radius * wobble * pool.stretch;
+        const px = x * Math.cos(pool.heading) - z * Math.sin(pool.heading);
+        const pz = x * Math.sin(pool.heading) + z * Math.cos(pool.heading);
+        if (index === 0) shape.moveTo(px, pz);
+        else shape.lineTo(px, pz);
+      }
+      const geometry = new THREE.ShapeGeometry(shape, 24);
+      geometry.rotateX(-Math.PI / 2);
+      const poolMesh = new THREE.Mesh(geometry, this.poolMaterial);
+      poolMesh.position.set(cx, y, cz);
+      poolMesh.renderOrder = 1;
+      this.scene.add(poolMesh);
+      // Water under the wheels: a thin slab the tyres can sense.
+      this.addFixed(null, RAPIER.ColliderDesc.cylinder(0.02, pool.radius * 0.8)
+        .setTranslation(cx, y - 0.02, cz), 'water');
+      // The monolith: standing, slightly off vertical, one lit seam.
+      const mx = cx + Math.cos(pool.heading) * pool.radius * 0.35;
+      const mz = cz + Math.sin(pool.heading) * pool.radius * 0.35;
+      const slab = toonMesh(new THREE.BoxGeometry(1.4, 7, 0.6), slabMaterial, { outline: 0.06 });
+      slab.position.set(mx, y + 2.9, mz);
+      slab.rotation.y = pool.heading + 0.5;
+      slab.rotation.z = 0.045;
+      this.scene.add(slab);
+      const seam = new THREE.Mesh(new THREE.BoxGeometry(0.07, 6.2, 0.02), glowMaterial);
+      seam.position.set(0, 0, 0.31);
+      slab.add(seam);
+      const quaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, slab.rotation.y, slab.rotation.z));
+      this.addFixed(null, RAPIER.ColliderDesc.cuboid(0.7, 3.5, 0.3)
+        .setTranslation(mx, y + 2.9, mz).setRotation(quaternion), 'metal');
+    }
   }
 
   /** Glowing hex plates that refill a vehicle's surge capacitors: the old grid, still generous. */

@@ -20,10 +20,10 @@ const SUN_DISTANCE = 200;       // how far up-sun the shadow-casting light sits
 // with its terminator facing away from the sun. Angular sizes in the shader are direction-space radii;
 // MOON_RADIUS ≈ 6.6°. Its seas are noise on the sphere, its craters are lit by the sun's actual angle,
 // and an old network of lines across it wakes teal with the grid.
-const MOON_DIRECTION = new THREE.Vector3(0.42, 0.4, -0.8).normalize();
-const MOON_RADIUS = 0.115;
-const MOON_PALE = 0xe6ddd0;
-const MOON_MARIA = 0x9c9088;
+export const MOON_DIRECTION = new THREE.Vector3(0.42, 0.4, -0.8).normalize();
+export const MOON_RADIUS = 0.115;
+export const MOON_PALE = 0xe6ddd0;
+export const MOON_MARIA = 0x9c9088;
 const MOON_INK = 0x2a1f1a;
 const MOON_GRID = 0x5ff0e0;
 const AURORA_GREEN = 0x3fe8b0;
