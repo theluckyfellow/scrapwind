@@ -247,7 +247,8 @@ export class GarageMenu {
     element('div', 'garage-heading', panel, 'Designs');
     const designs = element('div', 'garage-designs', panel);
     this.designSelect = element('select', '', designs);
-    button('', designs, 'Load', () => this.loadSelected());
+    // Picking a design loads it on the spot; no separate load button.
+    this.designSelect.addEventListener('change', () => this.loadSelected());
     button('', designs, 'Save', () => this.saveCurrent());
     button('', designs, 'Delete', () => this.deleteSelected());
     const files = element('div', 'garage-designs', panel);
