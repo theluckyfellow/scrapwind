@@ -53,11 +53,11 @@ const SURFACE_LANES = { startZ: 62, length: 95, width: 16, lanes: [['concrete', 
 const START_PAD = { at: [0, 30], size: 24 };
 const GROUND_PADS = [{ at: [55, 25], radius: 5 }, { at: [-55, 25], radius: 5 }];
 const MESAS = [
-  { at: [-210, -170], radius: 24, height: 28, sides: 9, pad: true },
-  { at: [70, -290], radius: 13, height: 48, sides: 7, pad: true },
-  { at: [-60, 270], radius: 7, height: 70, sides: 6, pad: true },     // the town mesa, watching the Yard
-  { at: [-340, 60], radius: 40, height: 34, sides: 11, pad: false },  // the dune overlook
-  { at: [-1300, -250], radius: 30, height: 40, sides: 9, pad: false }, // an island in the sand sea, tall enough to top any dune
+  { name: 'yardangMesa', at: [-210, -170], radius: 24, height: 28, sides: 9, pad: true },
+  { name: 'watcherMesa', at: [70, -290], radius: 13, height: 48, sides: 7, pad: true },
+  { name: 'needleMesa', at: [-60, 270], radius: 7, height: 70, sides: 6, pad: true },     // the town mesa, watching the Yard
+  { name: 'overlookMesa', at: [-340, 60], radius: 40, height: 34, sides: 11, pad: false },  // the dune overlook
+  { name: 'islandMesa', at: [-1300, -250], radius: 30, height: 40, sides: 9, pad: false }, // an island in the sand sea, tall enough to top any dune
 ];
 const RING = { center: [0, 34, -240], radius: 14, tube: 1.4, segments: 24 };
 const ARCH = { at: [-150, 125], span: 26, height: 15 };
@@ -88,6 +88,32 @@ const CRATE_SIZE = 1.2;
 const CRATE_MASS = 40;
 const BARREL_MASS = 30;
 const BEACON_PERIOD_SECONDS = 1.6;
+const BLOOM_SLOTS = 16;        // lit relays that can green the land at once (the grid has 13)
+
+// Where the land greens around a lit relay: moss and teal ground flecked with wildflowers, behind a
+// glowing edge that races outward as the bloom spreads. Injected into the terrain's toon shader.
+const BLOOM_FRAGMENT = /* glsl */ `
+  float bloomAmount = 0.0;
+  float bloomRim = 0.0;
+  for (int i = 0; i < ${BLOOM_SLOTS}; i++) {
+    vec3 bloom = uBloom[i];
+    if (bloom.z < 0.5) continue;
+    float ragged = (sin(vBloomWorld.x * 0.061) + sin(vBloomWorld.z * 0.047 + 1.3)) * 9.0;
+    float reach = distance(vBloomWorld.xz, bloom.xy) + ragged;
+    bloomAmount = max(bloomAmount, 1.0 - smoothstep(bloom.z * 0.82, bloom.z, reach));
+    bloomRim = max(bloomRim, smoothstep(bloom.z * 0.9, bloom.z * 0.985, reach) * (1.0 - smoothstep(bloom.z * 0.985, bloom.z * 1.02, reach)));
+  }
+  if (bloomAmount > 0.0) {
+    vec2 bloomCell = floor(vBloomWorld.xz * 0.6);
+    float seed = fract(sin(dot(bloomCell, vec2(12.9898, 78.233))) * 43758.5453);
+    vec3 moss = mix(vec3(0.12, 0.32, 0.08), vec3(0.05, 0.30, 0.22), smoothstep(0.2, 0.8, seed));
+    vec3 life = seed > 0.992 ? vec3(1.0, 0.75, 0.18)
+      : seed > 0.984 ? vec3(0.95, 0.35, 0.45)
+      : seed > 0.976 ? vec3(0.85, 0.9, 1.0)
+      : moss;
+    diffuseColor.rgb = mix(diffuseColor.rgb, life, bloomAmount * 0.9);
+  }
+`;
 
 // The colossal things. The Spire is the through-line's end: 550 m at the head of the canyon, visible
 // from the start line. The dish field drinks the sun beyond the salt; a wrecked hull drowns in the
@@ -113,7 +139,7 @@ const BOOST_PADS = [
   { at: [0, -95], radius: 4 },        // past the ramps, on the home straight
   { at: [-95, -45], radius: 4 },      // the gap-jump run-up
   { at: [125, 95], radius: 5 },       // in the bowl
-  { at: [-1600, 300], radius: 5 },    // the heart of the dune sea
+  { name: 'dunePad', at: [-1600, 300], radius: 5 },    // the heart of the dune sea
   { salt: true, radius: 8 },          // dead centre of the salt pan
   { roadZ: -1400, radius: 5 },        // halfway up the trade road
   { roadZ: -2250, radius: 6 },        // the Spire's foot
@@ -177,6 +203,8 @@ export class TestTrack {
   boostPads = [];        // [{ x, z, y, radius }] the surge pads a vehicle can charge from
   silkPods = [];         // [{ body, group, offset, lane }] kinematic freight pods on the Silk Line
   podClock = 0;          // seconds of simulated Silk Line time
+  bloomUniform;          // the terrain shader's bloom circles
+  spireAwakening = 0;
 
   constructor(world, scene) {
     this.world = world;
@@ -200,6 +228,9 @@ export class TestTrack {
     this.buildSettlement();
     this.buildBoostPads();
     this.buildProps();
+    // Rapier only indexes new colliders for ray queries when the world steps: one step now (props settle
+    // by a frame) so anything placed by raycasting after this, like the grid's relays, can see the valley.
+    this.world.step();
   }
 
   /**
@@ -227,7 +258,19 @@ export class TestTrack {
     body.applyImpulseAtPoint({ x: -force.x * dt, y: -force.y * dt, z: -force.z * dt }, ground.point, true);
   }
 
-  /** Height of the highest fixed ground at (x, z), ignoring vehicles and loose props. */
+  /**
+   * The first fixed surface below a point (x, fromY, z): what a camera or a hovering vehicle actually has
+   * underneath it. Arches, the floating ring and passing freight pods overhead don't count, and neither do
+   * vehicles. Starting inside a solid finds its far side, so nothing gets pushed up through a mesa.
+   */
+  surfaceBelow(x, fromY, z) {
+    const ray = new RAPIER.Ray({ x, y: fromY, z }, { x: 0, y: -1, z: 0 });
+    const flags = RAPIER.QueryFilterFlags.EXCLUDE_DYNAMIC | RAPIER.QueryFilterFlags.EXCLUDE_KINEMATIC;
+    const hit = this.world.castRay(ray, 2000, false, flags);
+    return hit ? fromY - hit.timeOfImpact : terrainHeight(x, z);
+  }
+
+  /** Height of the highest fixed ground at (x, z), ignoring loose props: what the haze lies on. */
   heightAt(x, z) {
     const ray = new RAPIER.Ray({ x, y: 1000, z }, { x: 0, y: -1, z: 0 });
     const hit = this.world.castRay(ray, 2000, true, RAPIER.QueryFilterFlags.EXCLUDE_DYNAMIC);
@@ -245,7 +288,8 @@ export class TestTrack {
       this.boostPadMaterial.emissiveIntensity = 1.3 + 0.6 * Math.sin(elapsedSeconds * 3.2);
     }
     if (this.spireCrown) {
-      this.spireCrown.material.emissiveIntensity = 1.6 + 1.2 * Math.sin(elapsedSeconds * 0.9);
+      const awake = this.spireAwakening ?? 0;
+      this.spireCrown.material.emissiveIntensity = (1.6 + 1.2 * Math.sin(elapsedSeconds * (0.9 + awake * 2.5))) * (1 + awake * 3);
     }
     if (this.sandfallMaterial) {
       this.sandfallMaterial.uniforms.uTime.value = elapsedSeconds;
@@ -403,9 +447,78 @@ export class TestTrack {
       for (let corner = 0; corner < 3; corner++) color.toArray(colors, (index + corner) * 3);
     }
     faceted.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    const mesh = new THREE.Mesh(faceted, toonMaterial(0xffffff, { vertexColors: true }));
+    const material = toonMaterial(0xffffff, { vertexColors: true });
+    this.addBloomTo(material);
+    const mesh = new THREE.Mesh(faceted, material);
     mesh.receiveShadow = true;
     this.scene.add(mesh);
+  }
+
+  /** Teaches the terrain shader to green the land in up to BLOOM_SLOTS circles (x, z, radius). */
+  addBloomTo(material) {
+    this.bloomUniform = { value: Array.from({ length: BLOOM_SLOTS }, () => new THREE.Vector3()) };
+    material.onBeforeCompile = shader => {
+      shader.uniforms.uBloom = this.bloomUniform;
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nvarying vec3 vBloomWorld;')
+        .replace('#include <project_vertex>', '#include <project_vertex>\nvBloomWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', `#include <common>\nvarying vec3 vBloomWorld;\nuniform vec3 uBloom[${BLOOM_SLOTS}];`)
+        .replace('#include <color_fragment>', `#include <color_fragment>\n${BLOOM_FRAGMENT}`)
+        .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += vec3(0.25, 0.95, 0.8) * bloomRim * 0.9;');
+    };
+    material.customProgramCacheKey = () => 'terrain-bloom';
+  }
+
+  /** Greens the land in a circle around (x, z); slot is which of the bloom circles to use. */
+  setBloom(slot, x, z, radius) {
+    if (slot < BLOOM_SLOTS) this.bloomUniform.value[slot].set(x, z, radius);
+  }
+
+  /** Back to dust everywhere. */
+  clearBlooms() {
+    for (const bloom of this.bloomUniform.value) bloom.set(0, 0, 0);
+  }
+
+  /** A named place in the valley as { x, z } (with radius for mesas), for things built around it. */
+  landmark(name) {
+    const mesa = MESAS.find(entry => entry.name === name);
+    if (mesa) return { x: mesa.at[0], z: mesa.at[1], radius: mesa.radius * 0.82 };
+    const pad = BOOST_PADS.find(entry => entry.name === name);
+    if (pad) return { x: pad.at[0], z: pad.at[1] };
+    const places = {
+      settlement: SETTLEMENT.center,
+      marbles: MARBLES.at,
+      salt: WORLD.salt.center,
+      dishField: DISH_FARM.center,
+      wreck: WRECK.at,
+      fallenRing: FALLEN_RING.at,
+      spire: SPIRE.at,
+    };
+    const [x, z] = places[name];
+    return { x, z };
+  }
+
+  /** Where the old trade road runs across the canyon at a given z. */
+  roadX(z) {
+    return canyonPathX(z);
+  }
+
+  /** Height of the bare terrain at (x, z), ignoring everything built on it. */
+  groundHeight(x, z) {
+    return terrainHeight(x, z);
+  }
+
+  /** The very top of the Spire's crown. */
+  spireTop() {
+    const [x, z] = SPIRE.at;
+    return new THREE.Vector3(x, terrainHeight(x, z) - 2 + SPIRE.height + SPIRE.crownRadius * 1.6, z);
+  }
+
+  /** How awake the Spire is (0..1): its crown flares and swells when the grid is whole. */
+  awakenSpire(level) {
+    this.spireAwakening = level;
+    if (this.spireCrown) this.spireCrown.scale.setScalar(1 + level * 0.8);
   }
 
   buildStartArea() {

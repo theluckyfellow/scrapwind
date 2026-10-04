@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import {
   BODIES, WHEELS, BATTERIES, BOOSTERS, ROTORS, BALLASTS, GYROS, PANEL_SLOTS, PAINTS, RIDE_HEIGHT_RANGE,
   TUBE_MASS_PER_METRE, BARE_FRAME_DRAG, DRIVER_MASS,
-  frameTubes, bodySize, slotAnchor, wheelHubPosition, rotorHubPosition,
+  CENTRE_LINE_TOLERANCE, frameTubes, bodySize, slotAnchor, wheelHubPosition, rotorHubPosition,
 } from './catalog.js';
 import { rotorPower, rotorTuning } from './Rotor.js';
 import { balancedShares } from './balance.js';
@@ -10,7 +10,12 @@ import { balancedShares } from './balance.js';
 const MODELS = { wheel: WHEELS, battery: BATTERIES, surge: BOOSTERS, rotor: ROTORS, ballast: BALLASTS, gyro: GYROS };
 const BOX_PARTS = ['battery', 'surge', 'ballast', 'gyro']; // solid boxes that must not overlap each other
 const DEFAULT_PANELS = { nose: 'panel', hood: 'panel', roof: 'panel', sides: 'doors', tail: 'panel', wing: 'none' };
-const MIRROR_EPSILON = 0.05;     // m; mounts this close to the centre line get no mirror twin
+const MIRROR_EPSILON = CENTRE_LINE_TOLERANCE; // mounts this close to the centre line get no mirror twin
+const MAX_MOUNTS = 96;
+const MAX_MOUNT_DISTANCE = 10;   // m from the frame's origin; anything further isn't on the frame
+const MAX_NAME_LENGTH = 40;
+const PAINT_PATTERN = /^#[0-9a-f]{6}$/i;
+const BALANCE_MARGIN = 0.05;     // m the centre of mass must sit inside the wheels (or rotors)
 const GRAVITY = 9.81;
 const AIR_DENSITY = 1.2;
 const ROLLING_RESISTANCE = 0.02;
@@ -59,20 +64,24 @@ export class Blueprint {
   adjustableRideHeight = true; // the test vehicle's privilege; later an upgrade
   nextMountId = 1;
 
+  /**
+   * Builds a design from saved data, which may come from a file, the cloud or another player: anything
+   * that isn't a known part, model, slot, dial or a finite number in range is quietly left out.
+   */
   constructor(data = {}) {
-    if (typeof data.name === 'string') this.name = data.name;
-    if (BODIES[data.body]) this.bodyKey = data.body;
-    if (typeof data.rideHeight === 'number') this.setRideHeight(data.rideHeight);
-    if (typeof data.paint === 'string') this.paint = data.paint;
+    if (!isRecord(data)) data = {};
+    if (typeof data.name === 'string') this.setName(data.name);
+    if (typeof data.body === 'string' && Object.hasOwn(BODIES, data.body)) this.bodyKey = data.body;
+    if (Number.isFinite(data.rideHeight)) this.setRideHeight(data.rideHeight);
+    if (typeof data.paint === 'string' && PAINT_PATTERN.test(data.paint)) this.paint = data.paint;
     if (typeof data.adjustableRideHeight === 'boolean') this.adjustableRideHeight = data.adjustableRideHeight;
-    for (const [slot, style] of Object.entries(data.panels ?? {})) this.setPanel(slot, style);
-    for (const [key, degrees] of Object.entries(data.alignment ?? {})) this.setAlignment(key, degrees);
-    for (const [key, value] of Object.entries(data.tuning ?? {})) this.setTuning(key, value);
-    for (const [key, mode] of Object.entries(data.controls ?? {})) this.setControls(key, mode);
-    for (const mount of data.mounts ?? []) {
-      if (MODELS[mount.part]?.[mount.model] && Array.isArray(mount.position)) {
-        this.addMount(mount.part, mount.model, mount.position, Boolean(mount.mirror));
-      }
+    for (const [slot, style] of entriesOf(data.panels)) this.setPanel(slot, style);
+    for (const [key, degrees] of entriesOf(data.alignment)) this.setAlignment(key, degrees);
+    for (const [key, value] of entriesOf(data.tuning)) this.setTuning(key, value);
+    for (const [key, mode] of entriesOf(data.controls)) this.setControls(key, mode);
+    const mounts = Array.isArray(data.mounts) ? data.mounts.slice(0, MAX_MOUNTS) : [];
+    for (const mount of mounts) {
+      if (isValidMount(mount)) this.addMount(mount.part, mount.model, mount.position, mount.mirror === true);
     }
   }
 
@@ -103,7 +112,7 @@ export class Blueprint {
   body() { return BODIES[this.bodyKey]; }
   frameTubes() { return frameTubes(this.body()); }
 
-  setName(name) { this.name = name.trim() || 'Unnamed'; }
+  setName(name) { this.name = String(name).trim().slice(0, MAX_NAME_LENGTH) || 'Unnamed'; }
   setPaint(paint) { this.paint = paint; }
 
   setRideHeight(height) {
@@ -111,24 +120,26 @@ export class Blueprint {
   }
 
   setPanel(slot, style) {
-    if (PANEL_SLOTS[slot]?.styles[style]) this.panels[slot] = style;
+    if (Object.hasOwn(PANEL_SLOTS, slot) && Object.hasOwn(PANEL_SLOTS[slot].styles, style)) this.panels[slot] = style;
   }
 
   /** Sets one alignment angle in degrees: frontToe, frontCamber, rearToe or rearCamber. */
   setAlignment(key, degrees) {
+    if (!Object.hasOwn(ALIGNMENT_DEFAULTS, key) || !Number.isFinite(degrees)) return;
     const limit = key.endsWith('Toe') ? ALIGNMENT_RANGE.toe : ALIGNMENT_RANGE.camber;
-    if (key in this.alignment) this.alignment[key] = THREE.MathUtils.clamp(degrees, -limit, limit);
+    this.alignment[key] = THREE.MathUtils.clamp(degrees, -limit, limit);
   }
 
   /** Sets one handling dial: torqueSplit, springRate, antiRoll, brakeBias or regen. */
   setTuning(key, value) {
+    if (!Object.hasOwn(TUNING_RANGES, key) || !Number.isFinite(value)) return;
     const range = TUNING_RANGES[key];
-    if (range) this.tuning[key] = THREE.MathUtils.clamp(value, range[0], range[1]);
+    this.tuning[key] = THREE.MathUtils.clamp(value, range[0], range[1]);
   }
 
   /** Sets a control setup: drive 'advanced'|'simple', flight 'assist'|'acro'. */
   setControls(key, mode) {
-    if (CONTROL_MODES[key]?.includes(mode)) this.controls[key] = mode;
+    if (Object.hasOwn(CONTROL_MODES, key) && CONTROL_MODES[key].includes(mode)) this.controls[key] = mode;
   }
 
   /** Switches to another tube body. Mount points belong to the old frame, so the parts come off. */
@@ -247,8 +258,10 @@ export class Blueprint {
 
     const loads = this.wheelLoads();
     const frontLoad = wheels.reduce((total, wheel, index) => total + (wheel.position[2] < centerOfMass.z ? loads[index] : 0), 0);
-    const hoverPower = rotors.reduce((total, rotor) => total + rotorPower(rotor.model, weight / rotors.length), 0)
-      * rotorTuning.flightDrain; // what hovering really costs the batteries, rotor heat included
+    // The rotors' own draw is what the batteries' power limit has to cover; the heat they waste on top
+    // drains charge but isn't capped, so it shortens the hover without stopping it.
+    const hoverDraw = rotors.reduce((total, rotor) => total + rotorPower(rotor.model, weight / rotors.length), 0);
+    const hoverPower = hoverDraw * rotorTuning.flightDrain;
     const surgeWatts = sum(surges, 'surgeWatts');
     const surgeJoules = sum(surges, 'surgeJoules');
 
@@ -262,7 +275,8 @@ export class Blueprint {
       rangeKilometres: capacity > 0 ? (capacity / cruisePower) * CRUISE_SPEED * 3.6 : 0,
       lift: rotors.length ? sum(rotors, 'maxThrust') / weight : 0,
       hoverPower,
-      hoverMinutes: hoverPower > 0 && hoverPower <= batteryPower ? (capacity / hoverPower) * 60 : 0,
+      hoverDraw,
+      hoverMinutes: hoverDraw > 0 && hoverDraw <= batteryPower ? (capacity / hoverPower) * 60 : 0,
       surgeWatts,
       boostSeconds: surgeWatts > 0 ? surgeJoules / surgeWatts : 0,
       gripBalance: this.gripBalance(wheels, loads, centerOfMass),
@@ -273,6 +287,11 @@ export class Blueprint {
       surgeCount: surges.length,
       gyroCount: gyros.length,
       rotorSpread: rotorSpread(rotors.map(rotor => rotorHubPosition(rotor.model, rotor.position))),
+      // Can the weight be held level at all? Only if it sits inside the wheels (and inside the rotors).
+      standsLevel: wheels.length < 3 || insideHull(
+        wheels.map(wheel => wheelHubPosition(wheel.model, wheel.position, this.rideHeight)), centerOfMass),
+      hoversLevel: rotors.length < 3 || insideHull(
+        rotors.map(rotor => rotorHubPosition(rotor.model, rotor.position)), centerOfMass),
     };
   }
 
@@ -280,16 +299,19 @@ export class Blueprint {
   warnings(stats = this.stats()) {
     const warnings = [];
     if (stats.wheelCount < 3) warnings.push('Needs at least three wheels to stand up.');
+    else if (!stats.standsLevel) warnings.push('The weight sits outside the wheels: it will tip over. Move weight inward or spread the wheels.');
     if (stats.batteryCount === 0) warnings.push('No batteries: nothing will move.');
     else if (stats.batteryPower < stats.wheelPower * 0.6) {
       warnings.push(`Batteries can only feed ${Math.round((stats.batteryPower / stats.wheelPower) * 100)}% of the motors' power.`);
     }
     if (stats.rotorCount > 0) {
       if (stats.rotorCount < 3 || !stats.rotorSpread) warnings.push('Rotors need spreading front-to-back and side-to-side to fly level.');
+      else if (!stats.hoversLevel) warnings.push('The weight sits outside the rotors: it will flip on take-off. Spread them around the middle.');
       if (stats.lift < 1.15) warnings.push(`Rotors can't lift this: thrust is ${Math.round(stats.lift * 100)}% of the weight.`);
-      else if (stats.hoverPower > stats.batteryPower) {
-        // With the flight drain, hovering usually costs more than the pack supplies: possible, but brief.
-        warnings.push(`Hovering draws ${kilowatts(stats.hoverPower)} kW (rotor heat included) and the batteries give ${kilowatts(stats.batteryPower)} kW — expect short hops, not cruises.`);
+      else if (stats.hoverDraw > stats.batteryPower) {
+        warnings.push(`Batteries can't power a hover: the rotors need ${kilowatts(stats.hoverDraw)} kW and the batteries give ${kilowatts(stats.batteryPower)} kW.`);
+      } else if (stats.hoverMinutes < 2) {
+        warnings.push(`Rotor heat burns charge fast: about ${Math.max(Math.round(stats.hoverMinutes * 60), 1)} seconds of hover. Short hops, not cruises.`);
       }
     }
     if (stats.wheelCount >= 3) {
@@ -420,4 +442,55 @@ function kilowatts(watts) {
 
 function round(value) {
   return Math.round(value * 1000) / 1000;
+}
+
+function isRecord(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function entriesOf(value) {
+  return isRecord(value) ? Object.entries(value) : [];
+}
+
+/** A saved mount that names a real part and model and sits at three finite, nearby coordinates. */
+function isValidMount(mount) {
+  return isRecord(mount)
+    && typeof mount.part === 'string' && Object.hasOwn(MODELS, mount.part)
+    && typeof mount.model === 'string' && Object.hasOwn(MODELS[mount.part], mount.model)
+    && Array.isArray(mount.position) && mount.position.length === 3
+    && mount.position.every(value => Number.isFinite(value) && Math.abs(value) <= MAX_MOUNT_DISTANCE);
+}
+
+/** Is the centre of mass's (x, z) inside the convex hull of the supports' (x, z), with a margin? */
+function insideHull(points, centerOfMass) {
+  const hull = convexHull(points.map(([x, , z]) => [x, z]));
+  if (hull.length < 3) return false;
+  for (let index = 0; index < hull.length; index++) {
+    const [ax, az] = hull[index];
+    const [bx, bz] = hull[(index + 1) % hull.length];
+    const edge = Math.hypot(bx - ax, bz - az);
+    if (edge < 1e-6) continue;
+    // Hull runs anticlockwise, so the inside is to the left of every edge.
+    const inward = ((bx - ax) * (centerOfMass.z - az) - (bz - az) * (centerOfMass.x - ax)) / edge;
+    if (inward < BALANCE_MARGIN) return false;
+  }
+  return true;
+}
+
+/** Andrew's monotone chain: the convex hull of 2D points, anticlockwise. */
+function convexHull(points) {
+  const sorted = [...points].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  if (sorted.length < 3) return sorted;
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lower = [];
+  for (const point of sorted) {
+    while (lower.length >= 2 && cross(lower.at(-2), lower.at(-1), point) <= 0) lower.pop();
+    lower.push(point);
+  }
+  const upper = [];
+  for (const point of [...sorted].reverse()) {
+    while (upper.length >= 2 && cross(upper.at(-2), upper.at(-1), point) <= 0) upper.pop();
+    upper.push(point);
+  }
+  return [...lower.slice(0, -1), ...upper.slice(0, -1)];
 }

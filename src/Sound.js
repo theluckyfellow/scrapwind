@@ -1,3 +1,5 @@
+import * as THREE from 'three';
+
 // Procedural audio: no assets, everything synthesized. Wind, the hub motors, the rotors, boost,
 // surge pads. The context starts on the first input gesture (browser autoplay rules); every update
 // just moves gains and pitches toward their targets, so the frame rate never matters.
@@ -8,6 +10,9 @@ const MOTOR_BASE_HZ = 46;
 const ROTOR_BASE_HZ = 110;
 const ROTOR_PITCH_PER_THRUST = 340; // Hz above base at full thrust
 const CHIME_HZ = [880, 1318];
+const RELAY_HUM_HZ = 55;        // the grid's hum, an octave under the motors' floor
+const WAKE_CHORD_HZ = [220, 277.18, 329.63, 440, 554.37]; // A major, spread wide: a relay waking
+const SPIRE_CHORD_HZ = [55, 110, 164.81, 220, 277.18, 329.63, 440, 659.25];
 
 export class Sound {
   context = null;
@@ -15,6 +20,19 @@ export class Sound {
   constructor() {
     window.addEventListener('pointerdown', () => this.ensure());
     window.addEventListener('keydown', () => this.ensure());
+    // A hidden tab shouldn't keep humming.
+    document.addEventListener('visibilitychange', () => {
+      if (!this.context) return;
+      if (document.hidden) this.context.suspend();
+      else this.context.resume();
+    });
+  }
+
+  /** Fades every running voice out: the vehicle has left the track. */
+  silence() {
+    if (!this.context) return;
+    const now = this.context.currentTime;
+    for (const gain of [this.windGain, this.motorGain, this.rotorGain, this.boostGain, this.humGain]) gain.gain.setTargetAtTime(0, now, 0.15);
   }
 
   /** Creates (or resumes) the audio graph; called on the first input gesture. */
@@ -78,6 +96,50 @@ export class Sound {
     this.boostGain.gain.value = 0;
     boostNoise.connect(boostFilter).connect(this.boostGain).connect(master);
     boostNoise.start();
+
+    // The grid: a low hum that swells and climbs while a relay drinks, through a resonant filter.
+    this.humGain = context.createGain();
+    this.humGain.gain.value = 0;
+    this.humFilter = context.createBiquadFilter();
+    this.humFilter.type = 'lowpass';
+    this.humFilter.frequency.value = 300;
+    this.humFilter.Q.value = 6;
+    this.humOsc = context.createOscillator();
+    this.humOsc.type = 'sawtooth';
+    this.humOsc.frequency.value = RELAY_HUM_HZ;
+    this.humOsc.connect(this.humFilter).connect(this.humGain).connect(master);
+    this.humOsc.start();
+  }
+
+  /** The relay hum: progress 0..1 raises its pitch and opens it up; null silences it. */
+  relayHum(progress) {
+    if (!this.context) return;
+    const now = this.context.currentTime;
+    const on = progress !== null;
+    this.humGain.gain.setTargetAtTime(on ? 0.05 + progress * 0.1 : 0, now, 0.12);
+    this.humOsc.frequency.setTargetAtTime(RELAY_HUM_HZ * (1 + (on ? progress : 0)), now, 0.2);
+    this.humFilter.frequency.setTargetAtTime(on ? 300 + progress * 2200 : 300, now, 0.2);
+  }
+
+  /** A relay wakes: a wide bright chord that blooms and rings out. The Spire gets a deeper, longer one. */
+  wake(spire = false) {
+    if (!this.context) return;
+    const context = this.context;
+    const notes = spire ? SPIRE_CHORD_HZ : WAKE_CHORD_HZ;
+    const length = spire ? 9 : 3.5;
+    notes.forEach((frequency, index) => {
+      const osc = context.createOscillator();
+      const gain = context.createGain();
+      osc.type = index % 2 ? 'triangle' : 'sine';
+      osc.frequency.value = frequency;
+      const start = context.currentTime + index * (spire ? 0.18 : 0.06);
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(spire ? 0.12 : 0.16, start + 0.08);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + length);
+      osc.connect(gain).connect(this.master);
+      osc.start(start);
+      osc.stop(start + length + 0.1);
+    });
   }
 
   /** Moves every voice toward the vehicle's current state; Game calls this once per frame. */

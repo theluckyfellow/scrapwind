@@ -77,6 +77,10 @@ export class Telemetry {
 
   update(vehicle, controls, frameSeconds) {
     if (this.showingDetails) this.drawArrows(vehicle.appliedForces());
+    if (this.padSince > 0) {
+      this.padSince = Math.max(this.padSince - frameSeconds, 0);
+      if (this.padSince === 0) this.padLabel.classList.remove('active');
+    }
 
     this.sinceReadout += frameSeconds;
     if (this.sinceReadout < READOUT_INTERVAL_SECONDS) return;
@@ -95,11 +99,6 @@ export class Telemetry {
     this.modeLabel.classList.toggle('flying', flying);
     const hints = flying ? FLY_HINTS : DRIVE_HINTS;
     this.hintLine.textContent = controls.usingGamepad() ? hints.gamepad : hints.keyboard;
-
-    if (this.padSince > 0) {
-      this.padSince = Math.max(this.padSince - frameSeconds, 0);
-      if (this.padSince === 0) this.padLabel.classList.remove('active');
-    }
 
     if (this.showingDetails) this.fillWheelTable(vehicle.wheelReadouts());
   }

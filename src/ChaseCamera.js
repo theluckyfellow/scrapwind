@@ -53,7 +53,7 @@ export class ChaseCamera {
     const horizontal = distance * Math.cos(this.orbitPitch);
     const desired = new THREE.Vector3(Math.sin(yaw) * horizontal, cameraTuning.height + cameraTuning.distance * Math.sin(this.orbitPitch), Math.cos(yaw) * horizontal)
       .add(targetPosition);
-    desired.y = Math.max(desired.y, this.track.heightAt(desired.x, desired.z) + MIN_GROUND_CLEARANCE);
+    desired.y = Math.max(desired.y, this.track.surfaceBelow(desired.x, desired.y + 1, desired.z) + MIN_GROUND_CLEARANCE);
 
     if (this.placed) {
       this.position.lerp(desired, 1 - Math.exp(-cameraTuning.followSharpness * dt));

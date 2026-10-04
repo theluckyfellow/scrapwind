@@ -56,7 +56,7 @@ export const PRESETS = {
     rideHeight: 0.26,
     paint: '#d94f6a',
     panels: { nose: 'splitter', hood: 'vented', roof: 'panel', sides: 'skirts', tail: 'ducktail', wing: 'low' },
-    alignment: { frontToe: -0.5, frontCamber: -2, rearToe: 0, rearCamber: -1 },
+    alignment: { frontToe: -0.5, frontCamber: 2, rearToe: 0, rearCamber: 1 },
     mounts: [
       { part: 'wheel', model: 'duner', position: railPoint(runner, 0, 1, 'bottom', LEFT, 0.6), mirror: true },
       { part: 'wheel', model: 'duner', position: railPoint(runner, 4, 5, 'bottom', LEFT, 0.35), mirror: true },
@@ -70,7 +70,7 @@ export const PRESETS = {
     rideHeight: 0.15,
     paint: '#4f6fd9',
     panels: { nose: 'splitter', hood: 'panel', roof: 'glass', sides: 'skirts', tail: 'ducktail', wing: 'high' },
-    alignment: { frontToe: 0, frontCamber: -1, rearToe: 0.5, rearCamber: 0 },
+    alignment: { frontToe: 0, frontCamber: 1, rearToe: 0.5, rearCamber: 0 },
     tuning: { torqueSplit: 0.62, springRate: 1.25, antiRoll: 1.5, brakeBias: 0.58, regen: 0.5 },
     mounts: [
       { part: 'wheel', model: 'velocity', position: railPoint(runner, 0, 1, 'bottom', LEFT, 0.6), mirror: true },

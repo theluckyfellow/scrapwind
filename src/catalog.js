@@ -6,6 +6,7 @@ export const TUBE_RADIUS = 0.035;                    // m, as drawn
 export const RIDE_HEIGHT_RANGE = { min: 0.1, max: 0.7 }; // m of clearance under the frame
 export const BARE_FRAME_DRAG = 0.95;                 // drag coefficient of an open tube frame
 export const DRIVER_MASS = 80;                       // kg, robot or human
+export const CENTRE_LINE_TOLERANCE = 0.05;              // m; parts this close to x = 0 sit on the centre line
 export const WHEEL_CLEARANCE = 0.05;                 // m between a frame tube and the inside of its tyre
 
 // A body is a run of cross-section rings from nose (−Z) to tail (+Z). Each ring is a trapezoid:
@@ -275,7 +276,7 @@ export function slotAnchor(body, slot) {
 
 /** Static hub centre of a wheel mounted at `mount` (chassis-local), with the frame bottom rideHeight off the ground. */
 export function wheelHubPosition(model, mount, rideHeight) {
-  const side = Math.sign(mount[0]);
+  const side = Math.abs(mount[0]) <= CENTRE_LINE_TOLERANCE ? 0 : Math.sign(mount[0]);
   return [mount[0] + side * (model.width / 2 + WHEEL_CLEARANCE), model.radius - rideHeight, mount[2]];
 }
 

@@ -3,6 +3,8 @@
 // The game builds a puppet vehicle per other player from their design, so everyone sees everyone.
 
 const STATE_HZ = 15;
+const RECONNECT_DELAYS = [1, 2, 4, 8, 15, 30]; // seconds between tries after the link drops
+const MAX_QUEUED = 20;                          // messages kept while connecting
 
 export class Net {
   status = 'offline';     // offline | connecting | online
@@ -13,9 +15,13 @@ export class Net {
   socket = null;
   name;
   sendTimer = 0;
+  queue = [];             // messages waiting for the socket to open
+  reconnectTry = 0;
+  reconnectTimer = null;
+  wantRoom = null;        // the room to rejoin after a dropped link
 
   // Callbacks the Game wires: onRoster(room code, players), onLeft(id), onState(id, state),
-  // onStatus(), onDesign(id, json), onNotice(text).
+  // onStatus(), onDesign(id, json), onNotice(text), onRenamed(id, name), onGrid(relay ids, by name or null).
   constructor(name, callbacks) {
     this.name = name;
     Object.assign(this, callbacks);
@@ -30,25 +36,59 @@ export class Net {
     this.socket = socket;
     socket.onopen = () => {
       this.status = 'online';
+      this.reconnectTry = 0;
       socket.send(JSON.stringify({ t: 'hello', name: this.name }));
+      for (const message of this.queue.splice(0)) socket.send(JSON.stringify(message));
       this.onStatus?.();
     };
     socket.onclose = () => {
       this.status = 'offline';
       const wasInRoom = this.room !== null;
+      if (wasInRoom) this.wantRoom = this.room;
       this.socket = null;
       this.room = null;
       this.myId = null;
       this.players.clear();
       this.onStatus?.();
       if (wasInRoom) this.onRoster?.(null, []);
+      this.scheduleReconnect();
     };
     socket.onerror = () => { this.status = 'offline'; this.onStatus?.(); };
     socket.onmessage = event => this.receive(event.data);
   }
 
+  /** Sends now if the link is up; otherwise holds the message (the latest few) until it is. */
   send(message) {
-    if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(message));
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      this.socket.send(JSON.stringify(message));
+      return;
+    }
+    if (message.t === 'state') return; // a stale pose is worthless
+    this.queue.push(message);
+    if (this.queue.length > MAX_QUEUED) this.queue.shift();
+    this.connect();
+  }
+
+  /** Tries the link again after a growing pause, and rejoins the room it was in. */
+  scheduleReconnect() {
+    if (this.reconnectTimer) return;
+    const delay = RECONNECT_DELAYS[Math.min(this.reconnectTry, RECONNECT_DELAYS.length - 1)];
+    this.reconnectTry++;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.wantRoom) {
+        this.onNotice?.('Reconnecting to the room…');
+        this.send({ t: 'join', code: this.wantRoom });
+      } else {
+        this.connect();
+      }
+    }, delay * 1000);
+  }
+
+  /** Changes this driver's name for everyone in the room (signing in does this). */
+  setName(name) {
+    this.name = name;
+    if (this.socket?.readyState === WebSocket.OPEN) this.send({ t: 'hello', name });
   }
 
   receive(text) {
@@ -64,6 +104,8 @@ export class Net {
         break;
       case 'room':
         this.room = message.code;
+        this.wantRoom = message.code;
+        this.onGrid?.(Array.isArray(message.grid) ? message.grid : [], null);
         this.mySlot = message.players.find(player => player.id === message.you)?.slot ?? 0;
         this.players.clear();
         for (const entry of message.players) {
@@ -78,6 +120,13 @@ export class Net {
       case 'left':
         this.players.delete(message.id);
         this.onLeft?.(message.id);
+        break;
+      case 'grid':
+        if (typeof message.relay === 'string') this.onGrid?.([message.relay], message.by ?? 'A crewmate');
+        break;
+      case 'renamed':
+        if (this.players.has(message.id)) this.players.get(message.id).name = message.name;
+        this.onRenamed?.(message.id, message.name);
         break;
       case 'design':
         if (this.players.has(message.id)) this.players.get(message.id).design = message.json;
@@ -111,11 +160,17 @@ export class Net {
   }
 
   leaveRoom() {
+    this.wantRoom = null;
     this.send({ t: 'leave' });
     const wasInRoom = this.room !== null;
     this.room = null;
     this.players.clear();
     if (wasInRoom) this.onRoster?.(null, []);
+  }
+
+  /** Tells the room which relays this player has woken (only matters inside a room). */
+  sendGrid(ids) {
+    if (this.room && ids.length) this.send({ t: 'grid', relays: ids });
   }
 
   sendDesign(json) {

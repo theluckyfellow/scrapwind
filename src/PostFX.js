@@ -125,7 +125,7 @@ export class PostFX {
   updateSun(camera) {
     const facing = camera.getWorldDirection(new THREE.Vector3()).dot(SUN_DIRECTION);
     if (facing <= 0.02) {
-      this.sunShafts.uniforms.intensity.value = 0;
+      this.clearSun();
       return;
     }
     const projected = camera.position.clone().addScaledVector(SUN_DIRECTION, 500).project(camera);
@@ -134,12 +134,15 @@ export class PostFX {
     // The shafts are a frame-space trick: they lie most when the sun sits near the frame's edge.
     const edge = Math.max(Math.abs(uv.x - 0.5), Math.abs(uv.y - 0.5)) * 2;
     const edgeFade = 1 - THREE.MathUtils.smoothstep(edge, 0.55, 1.15);
-    this.sunShafts.uniforms.intensity.value = SHAFT_INTENSITY * Math.min(facing * 2, 1) * edgeFade;
+    const intensity = SHAFT_INTENSITY * Math.min(facing * 2, 1) * edgeFade;
+    this.sunShafts.uniforms.intensity.value = intensity;
+    this.sunShafts.enabled = intensity > 0.001; // 21 texture taps a pixel: skip the pass when it adds nothing
   }
 
   /** No sun in the workshop: the garage renders without shafts. */
   clearSun() {
     this.sunShafts.uniforms.intensity.value = 0;
+    this.sunShafts.enabled = false;
   }
 
   setSize(width, height) {

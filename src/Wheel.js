@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { Part } from './Part.js';
 import { toonMesh } from './toon.js';
-import { wheelHubPosition } from './catalog.js';
+import { wheelHubPosition, CENTRE_LINE_TOLERANCE } from './catalog.js';
 
 export const wheelTuning = {
   dampingRatio: 0.5,          // suspension damping relative to critical; higher settles faster but rides harsher
@@ -87,7 +87,7 @@ export class Wheel extends Part {
   constructor(name, model, mountPoint, mountId) {
     super(name, mountPoint, mountId);
     this.model = model;
-    this.side = Math.sign(mountPoint.x);
+    this.side = sideOf(mountPoint.x);
     this.visual.position.set(0, 0, 0); // drawn from the chassis origin: the strut runs from mount to hub
     this.buildVisual();
   }
@@ -127,8 +127,13 @@ export class Wheel extends Part {
   /** The contact point, surface and slide state, for the dust. */
   contact() {
     return this.inContact
-      ? { point: this.ground.point, surface: this.ground.surface, sliding: this.sliding }
+      ? { point: this.ground.point, normal: this.ground.normal, surface: this.ground.surface, sliding: this.sliding }
       : null;
+  }
+
+  /** N pressing this tyre into the ground right now. */
+  currentLoad() {
+    return this.load;
   }
 
   /** Sets the steering angle in radians; positive steers right. */
@@ -356,7 +361,10 @@ export class Wheel extends Part {
       driveTorque = THREE.MathUtils.clamp(driveTorque, -cap, cap);
     }
     const inertia = wheelTuning.wheelInertiaScale * this.model.mass * radius * radius * 0.5;
-    const substeps = 4;
+    // Explicit steps stay stable while stiffness × step < ~1. The loop's stiffness is the grip curve's
+    // slope seen through the wheel's inertia; light wheels under heavy loads at low speed need many steps.
+    const stiffness = (maxForce * radius * radius) / (inertia * wheelTuning.peakSlipRatio * Math.max(Math.abs(longitudinalSpeed), LOW_SPEED_FLOOR));
+    const substeps = THREE.MathUtils.clamp(Math.ceil(stiffness * dt), 4, 64);
     for (let step = 0; step < substeps; step++) {
       const reaction = maxForce * longitudinalGripCurve(slipOf(this.spinSpeed));
       this.spinSpeed += ((driveTorque - reaction * radius) / inertia) * (dt / substeps);
@@ -422,4 +430,9 @@ function longitudinalGripCurve(slipRatio) {
   if (magnitude <= peak) fraction = magnitude / peak;
   else fraction = 1 - (1 - wheelTuning.slidingGrip) * THREE.MathUtils.clamp((magnitude - peak) / (slide - peak), 0, 1);
   return Math.sign(slipRatio) * fraction;
+}
+
+/** −1 left, +1 right, 0 on the centre line (within the same tolerance the garage uses for mirroring). */
+function sideOf(x) {
+  return Math.abs(x) <= CENTRE_LINE_TOLERANCE ? 0 : Math.sign(x);
 }

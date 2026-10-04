@@ -2,6 +2,7 @@ import { BODIES, WHEELS, BATTERIES, BOOSTERS, ROTORS, BALLASTS, GYROS, PANEL_SLO
 import { Blueprint, TUNING_RANGES } from './Blueprint.js';
 import { PRESETS } from './presets.js';
 import { element, button, downloadText } from './dom.js';
+import { readStored, writeStored } from './storage.js';
 import * as api from './api.js';
 
 const SAVED_DESIGNS_KEY = 'scrapwind-designs';
@@ -59,7 +60,12 @@ export class GarageMenu {
   root;
   garage;
   onTestDrive;
+  onOpenController;
   net;
+  grid = null;
+  gridLine;
+  gridReset;
+  gridResetArmedAt = 0;
   serverDesigns = [];
   bodyButtons = new Map();
   toolButtons = [];          // [{ node, part, modelKey }]
@@ -81,8 +87,9 @@ export class GarageMenu {
   designSelect;
   importInput;
 
-  constructor(parent, garage, onTestDrive, net = null) {
+  constructor(parent, garage, onTestDrive, net = null, onOpenController = null) {
     this.garage = garage;
+    this.onOpenController = onOpenController;
     this.onTestDrive = onTestDrive;
     this.net = net;
     this.root = element('div', 'garage-menu', parent);
@@ -163,6 +170,7 @@ export class GarageMenu {
     const options = element('div', 'garage-options', panel);
     this.mirrorBox = checkbox(options, 'Mirror left and right (M)', checked => this.garage.setMirror(checked));
     this.rotorsBox = checkbox(options, 'Show rotors unfolded', checked => this.garage.setRotorsOut(checked));
+    if (this.onOpenController) button('garage-controller', panel, 'Controller setup', () => this.onOpenController());
     this.hintLine = element('div', 'garage-hint', panel);
     this.setHint(null);
   }
@@ -319,6 +327,42 @@ export class GarageMenu {
     this.reloadServerDesigns();
   }
 
+  /** Adds the old grid's progress, and a way to start over, under the parts list. */
+  attachGrid(grid) {
+    this.grid = grid;
+    const section = element('div', 'garage-grid');
+    element('div', 'garage-heading', section, 'The old grid');
+    this.gridLine = element('div', 'garage-grid-line', section);
+    this.gridReset = button('garage-grid-reset', section, 'Forget grid progress', () => this.resetGrid());
+    this.hintLine.before(section);
+    this.refreshGrid();
+  }
+
+  refreshGrid() {
+    if (!this.grid || !this.gridLine) return;
+    const lit = this.grid.litCount();
+    const total = this.grid.total();
+    this.gridLine.textContent = this.grid.finished()
+      ? `All ${total} relays awake. The valley remembers.`
+      : lit === 0
+        ? `Every relay in the valley is dead. Drive charge to the one by the Yard to start.`
+        : `${lit} of ${total} relays awake. Wake them all and the Spire answers.`;
+  }
+
+  /** Two clicks within a few seconds, so a stray one can't wipe an evening's work. */
+  resetGrid() {
+    if (performance.now() - this.gridResetArmedAt > ARM_SECONDS * 1000) {
+      this.gridResetArmedAt = performance.now();
+      this.gridReset.textContent = 'Click again to forget every relay';
+      setTimeout(() => { this.gridReset.textContent = 'Forget grid progress'; }, ARM_SECONDS * 1000);
+      return;
+    }
+    this.gridResetArmedAt = 0;
+    this.grid.reset();
+    this.gridReset.textContent = 'Forget grid progress';
+    this.refreshGrid();
+  }
+
   refreshMultiplayer() {
     if (!this.mpStatusLine) return;
     const net = this.net;
@@ -364,7 +408,7 @@ export class GarageMenu {
     try {
       const signed = await api.signIn(name, password);
       this.accountPasswordInput.value = '';
-      if (this.net) this.net.name = signed;
+      this.net?.setName(signed);
       this.setHint(`Signed in as ${signed}. Designs save to your account.`);
     } catch (error) {
       this.setHint(error.message);
@@ -488,19 +532,11 @@ function checkbox(parent, label, onChange) {
 }
 
 function savedDesigns() {
-  try {
-    return JSON.parse(localStorage.getItem(SAVED_DESIGNS_KEY)) ?? {};
-  } catch {
-    return {};
-  }
+  return readStored(SAVED_DESIGNS_KEY, {}) ?? {};
 }
 
 function storeDesigns(designs) {
-  try {
-    localStorage.setItem(SAVED_DESIGNS_KEY, JSON.stringify(designs));
-  } catch {
-    // Storage can be full or blocked; saving to a file still works.
-  }
+  writeStored(SAVED_DESIGNS_KEY, designs); // full or blocked storage just doesn't save; files still work
 }
 
 function splitOnce(text, separator) {

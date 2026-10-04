@@ -155,7 +155,7 @@ export class FlightController {
     if (targetClimbRate < 0) {
       // Landing cushion: the nearer the ground, the gentler the descent, so holding descend sets it down softly.
       const centerOfMass = chassis.worldCenterOfMass();
-      const height = Math.max(altitude - track.heightAt(centerOfMass.x, centerOfMass.z) - RIDE_HEIGHT, 0);
+      const height = Math.max(altitude - track.surfaceBelow(centerOfMass.x, altitude, centerOfMass.z) - RIDE_HEIGHT, 0);
       targetClimbRate = Math.max(targetClimbRate, -(flightTuning.landingSpeed + flightTuning.landingCushion * height));
     }
     const verticalAcceleration = Math.max((targetClimbRate - climbRate) * flightTuning.climbResponse, -MAX_DIVE_ACCELERATION);

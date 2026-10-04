@@ -71,6 +71,16 @@ export class Sky {
     this.sun.target.updateMatrixWorld();
   }
 
+  /** How far the sky has answered the waking grid, 0..1. */
+  setAwakening(level) {
+    this.dome.material.uniforms.uAwakening.value = level;
+  }
+
+  /** The direction of the great moon, for things aimed at it. */
+  moonDirection() {
+    return MOON_DIRECTION.clone();
+  }
+
   /** Advances the slow sky animation (the aurora breathes). */
   updateTime(elapsedSeconds) {
     this.dome.material.uniforms.uTime.value = elapsedSeconds;
@@ -94,6 +104,7 @@ export class Sky {
         auroraGreen: { value: new THREE.Color(AURORA_GREEN) },
         auroraViolet: { value: new THREE.Color(AURORA_VIOLET) },
         uTime: { value: 0 },
+        uAwakening: { value: 0 },
       },
       vertexShader: /* glsl */ `
         varying vec3 viewDirection;
@@ -115,6 +126,7 @@ export class Sky {
         uniform vec3 auroraGreen;
         uniform vec3 auroraViolet;
         uniform float uTime;
+        uniform float uAwakening;
         varying vec3 viewDirection;
 
         void main() {
@@ -142,10 +154,11 @@ export class Sky {
           }
 
           // Aurora ribbons: slow green-violet curtains high up, breathing on a long period.
-          float auroraHeight = smoothstep(0.12, 0.45, height) * (1.0 - smoothstep(0.55, 0.9, height));
+          // When the grid wakes the sky answers: the aurora floods down toward the horizon and burns bright.
+          float auroraHeight = smoothstep(0.12 - 0.1 * uAwakening, 0.45 - 0.2 * uAwakening, height) * (1.0 - smoothstep(0.55 + 0.3 * uAwakening, 0.9 + 0.3 * uAwakening, height));
           float curtain = sin(direction.x * 6.0 + uTime * 0.11) * sin(direction.z * 4.5 - uTime * 0.07)
             + 0.6 * sin(direction.x * 13.0 - uTime * 0.05);
-          float aurora = auroraHeight * max(curtain, 0.0) * 0.09;
+          float aurora = auroraHeight * max(curtain, 0.0) * (0.09 + 0.5 * uAwakening);
           color += mix(auroraGreen, auroraViolet, 0.5 + 0.5 * sin(direction.z * 3.0 + uTime * 0.04)) * aurora;
 
           float toSun = max(dot(direction, normalize(sunDirection)), 0.0);

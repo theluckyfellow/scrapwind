@@ -50,6 +50,13 @@ export class BatteryPack {
     this.spread(-(watts * this.regenFraction * dt) / SECONDS_PER_HOUR);
   }
 
+  /** Gives charge away (to a relay), in watt-hours; returns how much the batteries actually had to give. */
+  discharge(wattHours) {
+    const before = this.charge();
+    this.spread(Math.min(Math.max(wattHours, 0), before));
+    return before - this.charge();
+  }
+
   /** Tops the pack up from outside (a surge pad on the track), in watt-hours. */
   topUp(wattHours) {
     this.spread(-wattHours);

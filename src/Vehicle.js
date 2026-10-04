@@ -36,6 +36,7 @@ const UPRIGHT_ROLL_SINE = 0.3; // sin of the roll angle where the assist wakes u
 const MAX_GYROS = 3;           // more gyro stabilizers than this add nothing
 const PAD_SURGE_WATTS = 120000; // a surge pad refills each capacitor at this rate
 const PAD_BATTERY_WATTS = 30000; // and trickles the batteries too
+const RELAY_STATION_WATTS = 150000; // a lit relay's plate fills batteries fast: the grid pays back
 const GRAVITY = 9.81;
 const AIR_DENSITY = 1.2;       // kg/m³
 const LOCAL_UP = new THREE.Vector3(0, 1, 0);
@@ -136,13 +137,16 @@ export class Vehicle {
       this.applyUprightAssist();
     }
 
-    // With the rotors out, the triggers fly instead of drive.
+    // With the rotors out, the triggers fly instead of drive: the left trigger descends, it doesn't brake.
     const throttle = this.rotorsDeployed ? 0 : controls.value('throttle');
-    const boost = this.rotorsDeployed ? 0 : controls.value('boost');
-    this.drivetrain.update(throttle, controls.value('brake'), this.chassis.forwardSpeed(), boost, dt);
-    this.batteryPack.beginStep();
+    const brake = this.rotorsDeployed ? 0 : controls.value('brake');
     const capacitors = this.capacitors();
     for (const capacitor of capacitors) capacitor.beginStep();
+    // Boost is the capacitors' surge: no capacitors, or flat ones, means no boost at all.
+    const surgeReady = capacitors.some(capacitor => capacitor.availableSurge() > 0);
+    const boost = this.rotorsDeployed || !surgeReady ? 0 : controls.value('boost');
+    this.drivetrain.update(throttle, brake, this.chassis.forwardSpeed(), boost, dt);
+    this.batteryPack.beginStep();
 
     // Rotors get first call on the power: staying in the air matters more than the wheels.
     for (const rotor of rotors) rotor.deployTowards(this.rotorsDeployed, dt);
@@ -171,7 +175,7 @@ export class Vehicle {
         for (const capacitor of capacitors) capacitor.deliver(capacitor.availableSurge() * (granted / surgeWatts), dt);
         wheelShare = Math.min(1, wheelShare + granted / wheelDemand);
       }
-      this.boostActive = capacitors.some(capacitor => capacitor.charge > 0);
+      this.boostActive = granted > 0;
     } else if (capacitors.length > 0 && this.batteryPack.charge() > 0) {
       // Off boost, the capacitors trickle themselves full from whatever the batteries can spare.
       const rechargeDemand = capacitors.reduce((sum, capacitor) => sum + capacitor.rechargeDemand(), 0);
@@ -227,6 +231,8 @@ export class Vehicle {
   reset() {
     this.chassis.placeAt(this.spawnPosition, this.spawnQuaternion);
     for (const part of this.parts) part.reset();
+    this.currentRideHeight = this.blueprint.rideHeight; // spawn height was worked out for this
+    this.refitSuspension();
     this.drivetrain.reset();
     this.flightController.reset();
     this.rotorsDeployed = false;
@@ -328,6 +334,13 @@ export class Vehicle {
   assignSteering(centerOfMass) {
     const wheels = this.wheels();
     for (const wheel of wheels) wheel.setSteering(wheel.hubZ() < centerOfMass.z - STEER_MARGIN);
+    if (wheels.length > 1 && !wheels.some(wheel => wheel.steers())) {
+      // Nothing sits well ahead of the weight: the front-most axle steers, as long as some wheel is behind it.
+      const front = Math.min(...wheels.map(wheel => wheel.hubZ()));
+      if (wheels.some(wheel => wheel.hubZ() > front + PAIR_DISTANCE)) {
+        for (const wheel of wheels) wheel.setSteering(wheel.hubZ() < front + PAIR_DISTANCE);
+      }
+    }
     const fixed = wheels.filter(wheel => !wheel.steers());
     this.steeringLineZ = fixed.length ? fixed.reduce((sum, wheel) => sum + wheel.hubZ(), 0) / fixed.length : centerOfMass.z;
   }
@@ -364,7 +377,9 @@ export class Vehicle {
   applyUprightAssist() {
     const speed = this.chassis.speed();
     if (speed < UPRIGHT_MIN_SPEED) return;
-    const roll = this.chassis.right().y;
+    // Lean measured against the ground the wheels are on, so a banked turn isn't "leaning".
+    const ground = this.groundNormal();
+    const roll = this.chassis.right().dot(ground);
     const threshold = this.simpleDrive ? 0.15 : UPRIGHT_ROLL_SINE;
     if (Math.abs(roll) < threshold) return;
     const strength = handlingTuning.uprightAssist
@@ -372,6 +387,27 @@ export class Vehicle {
     const assist = strength * (this.simpleDrive ? 1.6 : 1);
     const torque = this.chassis.forward().multiplyScalar(roll * this.chassis.mass() * GRAVITY * assist);
     this.chassis.twist(torque);
+  }
+
+  /** The average up direction of the ground under the wheels that touch it (world up if none do). */
+  groundNormal() {
+    const normal = new THREE.Vector3();
+    for (const wheel of this.wheels()) {
+      const contact = wheel.contact();
+      if (contact) normal.add(contact.normal);
+    }
+    return normal.lengthSq() > 0 ? normal.normalize() : LOCAL_UP.clone();
+  }
+
+  /** A lit relay's plate: a proper charging station for batteries and capacitors alike. */
+  chargeFromRelay(dt) {
+    for (const capacitor of this.capacitors()) capacitor.chargeWith(PAD_SURGE_WATTS, dt);
+    this.batteryPack.topUp((RELAY_STATION_WATTS * dt) / 3600);
+  }
+
+  /** Gives charge to a relay; returns the watt-hours the batteries actually had. */
+  dischargeInto(wattHours) {
+    return this.batteryPack.discharge(wattHours);
   }
 
   /** A surge pad on the track pours charge into the capacitors, and a little into the batteries. */
@@ -418,13 +454,15 @@ export class Vehicle {
 
   /** A little extra turn-in at low and middling speeds, where big builds feel laziest. */
   applyYawAssist(dt) {
-    const speed = Math.abs(this.chassis.forwardSpeed());
+    const forwardSpeed = this.chassis.forwardSpeed();
+    const speed = Math.abs(forwardSpeed);
     if (speed < 1) return;
     const fade = this.simpleDrive
       ? 2 // assisted driving keeps the full turn-in help at every speed
       : 1 - THREE.MathUtils.clamp((speed - handlingTuning.yawAssistMaxSpeed / 2) / (handlingTuning.yawAssistMaxSpeed / 2), 0, 1);
     if (fade <= 0) return;
-    const torque = this.steerAngle * Math.min(speed, handlingTuning.yawAssistMaxSpeed)
+    // Reversing, the same steer swings the nose the other way, so the assist must too.
+    const torque = Math.sign(forwardSpeed) * this.steerAngle * Math.min(speed, handlingTuning.yawAssistMaxSpeed)
       * handlingTuning.yawAssistTorque * fade;
     this.chassis.twist(this.chassis.up().multiplyScalar(-torque));
   }
@@ -433,8 +471,12 @@ export class Vehicle {
   applyAntiRoll() {
     for (const [left, right] of this.antiRollPairs) {
       if (!left.touchingGround() || !right.touchingGround()) continue;
-      const transfer = (left.compressionAmount() - right.compressionAmount())
+      const wanted = (left.compressionAmount() - right.compressionAmount())
         * handlingTuning.antiRollStiffness * this.antiRollScale;
+      // A bar can't pull a wheel below zero load, so it moves no more than the lighter wheel carries;
+      // anything else would push the whole body up and help it roll over.
+      const available = wanted > 0 ? right.currentLoad() : left.currentLoad();
+      const transfer = Math.sign(wanted) * Math.min(Math.abs(wanted), available);
       left.shareLoad(this.chassis, transfer);
       right.shareLoad(this.chassis, -transfer);
     }

@@ -88,6 +88,7 @@ export class Garage {
   tool = null;                   // { part, modelKey } while placing, else null
   mirror = true;
   rotorsOut = false;
+  rebuildPending = false;
   candidate = null;              // { position, reason } where the tool would place right now
   ghost = new THREE.Group();
   ghostMaterials = {
@@ -134,7 +135,7 @@ export class Garage {
   activate() {
     this.active = true;
     this.orbit.enabled = true;
-    this.rebuild();
+    this.rebuildNow();
   }
 
   deactivate() {
@@ -184,8 +185,18 @@ export class Garage {
     this.rebuild();
   }
 
-  /** Rebuilds the preview from the Blueprint after any change. */
+  /**
+   * Asks for the preview to be rebuilt from the Blueprint after a change. The stats refresh at once; the
+   * rebuild itself waits for the next frame, so dragging a slider costs one rebuild a frame, not one an event.
+   */
   rebuild() {
+    this.rebuildPending = true;
+    this.onChange();
+  }
+
+  /** Rebuilds the preview right now. */
+  rebuildNow() {
+    this.rebuildPending = false;
     if (this.vehicle) this.vehicle.dispose(this.world);
     this.vehicle = new Vehicle(this.world, this.blueprint, STAGE, 0);
     this.vehicle.showAtRest(STAGE, this.rotorsOut);
@@ -195,6 +206,7 @@ export class Garage {
   }
 
   update() {
+    if (this.rebuildPending) this.rebuildNow();
     if (this.active) this.orbit.update();
   }
 

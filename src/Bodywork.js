@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { BODIES, TUBE_RADIUS, frameTubes, ringCorners } from './catalog.js';
-import { toonMesh, toonMaterial, OUTLINE_COLOR } from './toon.js';
+import { toonMesh, toonMaterial, OUTLINE_COLOR, mergeStaticMeshes } from './toon.js';
 
 const FRAME_COLOR = 0x2d2a28;
 const FLOOR_COLOR = 0x4a4d50;
@@ -111,6 +111,14 @@ export class Bodywork {
     this.buildPanels(body, blueprint.panels, blueprint.paint);
     this.buildDriver(body);
     this.group.add(this.panelGroup);
+    // Dozens of tubes, joints and panels become a few draw calls. The tubes stay behind, hidden, for the
+    // garage to pick mount points on; the floor stays whole (it is a pick target with ink lines of its own);
+    // the panels merge among themselves so the garage can still hide them.
+    mergeStaticMeshes(this.panelGroup);
+    mergeStaticMeshes(this.group, {
+      keep: node => node === this.panelGroup || node.userData.mountSurface?.kind === 'floor',
+      pickable: mesh => this.mountSurfaces.includes(mesh),
+    });
   }
 
   /** Shows the panels, or ghosts them translucent so the frame can be seen and clicked while placing parts. */

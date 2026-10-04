@@ -1,24 +1,26 @@
 // Account API: bearer-token sessions in localStorage, designs saved per user in Postgres.
 // Everything here degrades gracefully: without a server database the UI just stays signed out.
 
+import { readText, writeText, forget } from './storage.js';
+
 const TOKEN_KEY = 'scrapwind-token';
 const NAME_KEY = 'scrapwind-user';
 
 export function signedIn() {
-  return Boolean(localStorage.getItem(TOKEN_KEY) && localStorage.getItem(NAME_KEY));
+  return Boolean(readText(TOKEN_KEY) && readText(NAME_KEY));
 }
 
 export function userName() {
-  return localStorage.getItem(NAME_KEY) ?? '';
+  return readText(NAME_KEY, '');
 }
 
 function store(token, name) {
-  localStorage.setItem(TOKEN_KEY, token);
-  localStorage.setItem(NAME_KEY, name);
+  writeText(TOKEN_KEY, token);
+  writeText(NAME_KEY, name);
 }
 
 async function request(path, options = {}) {
-  const token = localStorage.getItem(TOKEN_KEY);
+  const token = readText(TOKEN_KEY);
   const response = await fetch(path, {
     ...options,
     headers: {
@@ -28,7 +30,11 @@ async function request(path, options = {}) {
     },
   });
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error ?? 'The server said no.');
+  if (!response.ok) {
+    const error = new Error(body.error ?? 'The server said no.');
+    error.status = response.status;
+    throw error;
+  }
   return body;
 }
 
@@ -37,8 +43,14 @@ export async function signIn(name, password) {
   let body;
   try {
     body = await request('/api/login', { method: 'POST', body: JSON.stringify({ name, password }) });
-  } catch {
-    body = await request('/api/register', { method: 'POST', body: JSON.stringify({ name, password }) });
+  } catch (loginError) {
+    if (loginError.status !== 401) throw loginError; // offline, rate-limited, bad input: say so
+    try {
+      body = await request('/api/register', { method: 'POST', body: JSON.stringify({ name, password }) });
+    } catch (registerError) {
+      // The name exists, so the login failure was the password.
+      throw registerError.status === 409 ? new Error('Wrong password for that name.') : registerError;
+    }
   }
   store(body.token, body.name);
   return body.name;
@@ -50,8 +62,8 @@ export async function signOut() {
   } catch {
     // The token may already be dead; clearing locally is what matters.
   }
-  localStorage.removeItem(TOKEN_KEY);
-  localStorage.removeItem(NAME_KEY);
+  forget(TOKEN_KEY);
+  forget(NAME_KEY);
 }
 
 export async function listDesigns() {

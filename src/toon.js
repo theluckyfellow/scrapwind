@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
+import { mergeVertices, mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 // Toon look helpers: hard-stepped lighting and ink outlines, shared by everything in the world.
 
@@ -89,4 +89,77 @@ export function disposeTree(object) {
 
 function isSharedMaterial(material) {
   return [...outlineMaterials.values()].includes(material);
+}
+
+/**
+ * Bakes every still mesh under `root` into one mesh per material, outlines included: a pile of small
+ * parts becomes a handful of draw calls. Meshes for which `keep(mesh)` is true (or that sit under a kept
+ * object) stay as they are: anything that moves, changes colour or must stay separate. Meshes for which
+ * `pickable(mesh)` is true are merged but left in place, hidden, so raycasts (the garage's mount picking)
+ * still find them. Transparent and custom-shader meshes always stay as they are.
+ */
+export function mergeStaticMeshes(root, { keep = () => false, pickable = () => false } = {}) {
+  root.updateMatrixWorld(true);
+  const toRoot = root.matrixWorld.clone().invert();
+  const buckets = new Map();   // material key → { material, castShadow, receiveShadow, geometries }
+  const merged = [];
+  root.traverse(object => {
+    if (!object.isMesh || object.isInstancedMesh || !isMergeable(object, root, keep)) return;
+    const key = `${materialKey(object.material)}|${object.castShadow}|${object.receiveShadow}`;
+    if (!buckets.has(key)) {
+      buckets.set(key, { material: object.material, castShadow: object.castShadow, receiveShadow: object.receiveShadow, geometries: [] });
+    }
+    buckets.get(key).geometries.push(bakedGeometry(object, toRoot));
+    merged.push(object);
+  });
+  for (const object of merged) {
+    if (pickable(object)) {
+      object.visible = false;
+      continue;
+    }
+    // Children that weren't merged (a kept part hanging off a merged one) move up, keeping their place.
+    for (const child of [...object.children]) {
+      if (!merged.includes(child)) object.parent.attach(child);
+    }
+    object.removeFromParent();
+    object.geometry.dispose();
+  }
+  for (const bucket of buckets.values()) {
+    const mesh = new THREE.Mesh(mergeGeometries(bucket.geometries), bucket.material);
+    mesh.castShadow = bucket.castShadow;
+    mesh.receiveShadow = bucket.receiveShadow;
+    root.add(mesh);
+    for (const geometry of bucket.geometries) geometry.dispose();
+  }
+  return buckets.size;
+}
+
+function isMergeable(object, root, keep) {
+  const material = object.material;
+  if (Array.isArray(material) || material.transparent || material.isShaderMaterial) return false;
+  for (let node = object; node && node !== root; node = node.parent) {
+    if (keep(node) || !node.visible) return false;
+  }
+  return true;
+}
+
+/** Meshes with equal-looking materials can share one; outline materials are shared instances already. */
+function materialKey(material) {
+  if (isSharedMaterial(material)) return material.uuid;
+  return [
+    material.type, material.color?.getHexString(), material.emissive?.getHexString(), material.emissiveIntensity,
+    material.side, material.vertexColors, material.gradientMap?.uuid,
+  ].join(':');
+}
+
+/** A copy of a mesh's geometry in the root's space, reduced to the attributes every merge partner has. */
+function bakedGeometry(object, toRoot) {
+  let geometry = object.geometry.clone();
+  for (const name of Object.keys(geometry.attributes)) {
+    if (name !== 'position' && name !== 'normal' && !(name === 'color' && object.material.vertexColors)) geometry.deleteAttribute(name);
+  }
+  if (geometry.index) geometry = geometry.toNonIndexed();
+  if (!geometry.attributes.normal) geometry.computeVertexNormals();
+  geometry.morphAttributes = {};
+  return geometry.applyMatrix4(toRoot.clone().multiply(object.matrixWorld));
 }

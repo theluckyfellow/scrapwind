@@ -18,11 +18,16 @@ import { Haze } from './Haze.js';
 import { Sound } from './Sound.js';
 import { Net } from './Net.js';
 import * as api from './api.js';
+import { readStored, writeStored } from './storage.js';
 import { Garage } from './Garage.js';
 import { GarageMenu } from './GarageMenu.js';
 import { ChaseCamera, cameraTuning } from './ChaseCamera.js';
 import { Telemetry } from './Telemetry.js';
 import { TuningPanel } from './TuningPanel.js';
+import { ControllerSetup } from './ControllerSetup.js';
+import { Toast } from './Toast.js';
+import { Grid } from './Grid.js';
+import { GridCompass } from './GridCompass.js';
 
 const GRAVITY = -9.81;
 const SPAWN_GROUND = new THREE.Vector3(0, 0.03, 30); // on the start pad
@@ -90,33 +95,42 @@ export class Game {
     this.dust = new Dust(this.scene);
     this.haze = new Haze(this.scene);
     this.sound = new Sound();
+    this.grid = new Grid(this.track, this.sky, this.scene, this.world);
 
+    this.toast = new Toast(document.body);
     this.controls = new Controls(window);
+    this.controls.onPadChange = text => this.toast.show(text);
+    this.controllerSetup = new ControllerSetup(document.body, this.controls);
     this.chaseCamera = new ChaseCamera(this.camera, this.track);
     this.telemetry = new Telemetry(hudElement, this.scene);
+    this.gridCompass = new GridCompass(hudElement, this.grid);
+    this.grid.onLit = (relay, info) => this.relayWoke(relay, info);
     this.garage = new Garage(canvas, loadLastDesign(), {
       onChange: () => this.garageMenu?.refresh(),
       onHint: text => this.garageMenu?.setHint(text),
     });
-    this.net = new Net(localStorage.getItem('scrapwind-user') ?? 'Drifter', {
+    this.net = new Net(api.userName() || 'Drifter', {
       onRoster: (code, players) => this.syncRemotes(code, players),
       onLeft: id => this.removeRemote(id),
       onState: (id, state) => {
         const remote = this.remotes.get(id);
-        if (remote) {
+        if (remote && isPose(state)) {
           remote.target.pos.set(...state.pos);
-          remote.target.quaternion.set(...state.quaternion);
+          remote.target.quaternion.set(...state.quaternion).normalize();
           remote.target.speed = state.speed;
           remote.target.flying = state.flying;
           remote.target.boosting = state.boosting;
         }
       },
       onDesign: id => this.refreshRemoteDesign(id),
+      onRenamed: (id, name) => this.renameRemote(id, name),
+      onGrid: (ids, by) => this.shareGrid(ids, by),
       onStatus: () => this.garageMenu?.refreshMultiplayer(),
-      onNotice: text => this.garageMenu?.setHint(text),
+      onNotice: text => this.toast.show(text),
     });
     this.net.connect();
-    this.garageMenu = new GarageMenu(document.body, this.garage, blueprint => this.startDrive(blueprint), this.net);
+    this.garageMenu = new GarageMenu(document.body, this.garage, blueprint => this.startDrive(blueprint), this.net, () => this.controllerSetup.show());
+    this.garageMenu.attachGrid(this.grid);
     this.tuningPanel = new TuningPanel([
       { title: 'Chassis', record: chassisTuning, onChange: () => this.vehicle?.applyMassTuning() },
       { title: 'Suspension and tyres', record: wheelTuning, onChange: () => this.vehicle?.refitSuspension() },
@@ -156,12 +170,14 @@ export class Game {
       this.vehicle.chargeFromPad(dt);
       this.telemetry.flashPad();
     }
+    this.grid.charge(this.vehicle, dt);
     if (this.vehicle.altitude() < FALL_LIMIT) this.respawn();
   }
 
   /** Draws a frame; alpha (0..1) is how far we are between the last two physics steps. */
   render(alpha, frameSeconds) {
     this.elapsedSeconds += frameSeconds;
+    this.controllerSetup.update();
     if (this.mode === 'garage') {
       this.garage.update();
       this.postfx.target(this.garage.scene, this.garage.camera);
@@ -188,11 +204,41 @@ export class Game {
     this.haze.update(position, frameSeconds, (x, z) => this.track.heightAt(x, z));
     this.sound.update(this.vehicle, frameSeconds);
     this.telemetry.update(this.vehicle, this.controls, frameSeconds);
+    this.grid.update(this.elapsedSeconds, frameSeconds, this.vehicle);
+    this.gridCompass.update(this.grid, this.camera, position, frameSeconds);
+    const feeding = this.grid.chargingRelay;
+    this.sound.relayHum(feeding ? this.grid.delivered(feeding) / feeding.definition.cost : null);
     this.postfx.target(this.scene, this.camera);
     this.postfx.updateSun(this.camera);
     this.postfx.render();
     this.net.sendState(this.vehicle, frameSeconds);
     this.updateRemotes(frameSeconds);
+  }
+
+  // ---- The grid ----
+
+  /** A relay woke: tell the room (if it was us), and make an occasion of it (unless it's old news). */
+  relayWoke(relay, { quiet, by, count, total }) {
+    if (!by) this.net.sendGrid([relay.id()]);
+    this.garageMenu?.refreshGrid();
+    if (quiet) return;
+    const { title, name, finale } = relay.definition;
+    this.sound.wake(finale);
+    if (finale) {
+      this.gridCompass.showTitle(by);
+      return;
+    }
+    const lead = by ? `${by} woke ${title} ${name}` : `${title} ${name} is awake`;
+    this.toast.show(`${lead} · ${count} of ${total} · its plate charges you now`);
+  }
+
+  /**
+   * The room's grid. A snapshot on joining (by is null): wake what the crew has woken, quietly, then
+   * offer up what we had that they didn't. Live news (by is a name): wake it with the full show.
+   */
+  shareGrid(ids, by) {
+    for (const id of ids) this.grid.light(id, by ? { by } : { quiet: true, by: 'room' });
+    if (!by) this.net.sendGrid(this.grid.relayList().filter(relay => relay.isLit()).map(relay => relay.id()));
   }
 
   // ---- Multiplayer puppets ----
@@ -218,6 +264,15 @@ export class Game {
 
   /** A puppet: the real Vehicle visuals over a kinematic body, driven by its owner's pose stream. */
   spawnRemote(entry) {
+    try {
+      this.buildRemote(entry);
+    } catch (error) {
+      // Someone else's broken design must never take this game down; they just don't appear.
+      console.warn(`Couldn't build ${entry.name}'s vehicle:`, error);
+    }
+  }
+
+  buildRemote(entry) {
     const slot = entry.slot ?? 0;
     const spawn = SPAWN_GROUND.clone().add(new THREE.Vector3(slot * SPAWN_SLOT_SPACING, 0, 0));
     const vehicle = new Vehicle(this.world, Blueprint.fromJSON(entry.design), spawn, SPAWN_HEADING);
@@ -243,18 +298,27 @@ export class Game {
     if (!remote) return;
     remote.vehicle.dispose(this.world);
     remote.vehicle.visual().removeFromParent();
-    remote.tag.removeFromParent();
+    disposeNameTag(remote.tag);
     this.remotes.delete(id);
     this.garageMenu?.refreshMultiplayer();
   }
 
-  /** Redraws a puppet when its owner re-sent their design (they rebuilt in the garage). */
+  /** Builds or redraws a puppet when its owner sends a design (their first, or a rebuild in the garage). */
   refreshRemoteDesign(id) {
     const entry = this.net.players.get(id);
-    if (entry?.design && this.remotes.has(id)) {
-      this.removeRemote(id);
-      this.spawnRemote(entry);
-    }
+    if (!entry?.design) return;
+    if (this.remotes.has(id)) this.removeRemote(id);
+    this.spawnRemote(entry);
+    this.garageMenu?.refreshMultiplayer();
+  }
+
+  /** A driver changed their name (signed in, usually): repaint their tag. */
+  renameRemote(id, name) {
+    const remote = this.remotes.get(id);
+    if (!remote) return;
+    disposeNameTag(remote.tag);
+    remote.tag = this.makeNameTag(name);
+    this.garageMenu?.refreshMultiplayer();
   }
 
   /** Chases each puppet's latest received pose with exponential smoothing, then draws it. */
@@ -305,10 +369,11 @@ export class Game {
     for (const source of this.vehicle.dustSources()) this.dust.emit(source, frameSeconds);
     if (this.vehicle.flying()) {
       const position = this.vehicle.drawnPosition();
-      const altitude = position.y - this.track.heightAt(position.x, position.z);
+      const ground = this.track.surfaceBelow(position.x, position.y, position.z);
+      const altitude = position.y - ground;
       if (altitude < 5) {
         this.dust.emit({
-          point: new THREE.Vector3(position.x, this.track.heightAt(position.x, position.z), position.z),
+          point: new THREE.Vector3(position.x, ground, position.z),
           color: 0xd8b98a,
           intensity: THREE.MathUtils.clamp(1 - altitude / 5, 0, 1) * 0.8,
           spark: false,
@@ -328,6 +393,7 @@ export class Game {
     this.scene.add(this.vehicle.visual());
     storeLastDesign(blueprint);
     this.mode = 'drive';
+    this.controllerSetup.close();
     this.garage.deactivate();
     this.garageMenu.hide();
     this.telemetry.setVisible(true);
@@ -341,6 +407,7 @@ export class Game {
       this.vehicle.dispose(this.world);
       this.vehicle = null;
     }
+    this.sound.silence();
     this.mode = 'garage';
     this.telemetry.setVisible(false);
     this.garage.activate();
@@ -364,19 +431,28 @@ export class Game {
 }
 
 function loadLastDesign() {
+  const saved = readStored(LAST_DESIGN_KEY, null);
   try {
-    const saved = localStorage.getItem(LAST_DESIGN_KEY);
     if (saved) return Blueprint.fromJSON(saved);
   } catch {
-    // A missing or unreadable save just means starting from the starter design.
+    // An unreadable save just means starting from the starter design.
   }
   return Blueprint.fromJSON(PRESETS[DEFAULT_PRESET]);
 }
 
 function storeLastDesign(blueprint) {
-  try {
-    localStorage.setItem(LAST_DESIGN_KEY, JSON.stringify(blueprint.toJSON()));
-  } catch {
-    // Not being able to remember the design is fine.
-  }
+  writeStored(LAST_DESIGN_KEY, blueprint.toJSON());
+}
+
+/** A pose from the network that is safe to apply: three finite numbers and a four-number rotation. */
+function isPose(state) {
+  return Array.isArray(state.pos) && state.pos.length === 3 && state.pos.every(Number.isFinite)
+    && Array.isArray(state.quaternion) && state.quaternion.length === 4 && state.quaternion.every(Number.isFinite)
+    && Math.hypot(...state.quaternion) > 0.5;
+}
+
+function disposeNameTag(tag) {
+  tag.removeFromParent();
+  tag.material.map?.dispose();
+  tag.material.dispose();
 }
