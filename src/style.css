@@ -210,6 +210,12 @@ input.hidden {
   opacity: 0.8;
 }
 
+.dash-readouts span.boosting {
+  color: var(--sky);
+  opacity: 1;
+  text-shadow: 0 0 8px var(--sky);
+}
+
 .charge-fill {
   background: linear-gradient(90deg, #6fe36f, #9be38f);
 }
@@ -448,3 +454,18 @@ input.hidden {
   border: 3px solid var(--ink) !important;
   transform: skewX(-6deg);
 }
+
+/* The surge-pad notice, flashed while a pad pours charge into the build. */
+.pad-flash {
+  position: absolute;
+  top: 16%;
+  left: 50%;
+  transform: translateX(-50%);
+  color: #64ffe0;
+  letter-spacing: 0.35em;
+  font-weight: bold;
+  opacity: 0;
+  transition: opacity 0.35s ease;
+  pointer-events: none;
+}
+.pad-flash.active { opacity: 1; }

@@ -3,24 +3,33 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js';
 import { toonMesh, toonMaterial, faceted } from './toon.js';
 
-/** Ground types: grip multiplies the tyre's grip; rolling resistance is a fraction of the tyre's load; loose ground favours knobbly tyres. */
+/** Ground types: grip multiplies the tyre's grip; rolling resistance is a fraction of the tyre's load; loose ground favours paddle and knobbly tyres. */
 export const SURFACES = {
-  dirt: { name: 'Dirt', grip: 1.0, rollingResistance: 0.02, color: 0xc9915c },
-  sand: { name: 'Sand', grip: 0.72, rollingResistance: 0.07, color: 0xf0cf8f, loose: true },
-  mud: { name: 'Mud', grip: 0.45, rollingResistance: 0.1, color: 0x6e4c35, loose: true },
-  rock: { name: 'Rock', grip: 1.1, rollingResistance: 0.012, color: 0x9c7462 },
+  dirt: { name: 'Gobi gravel', grip: 1.0, rollingResistance: 0.02, color: 0xc9a06b },
+  sand: { name: 'Dune sand', grip: 0.72, rollingResistance: 0.07, color: 0xf0cf8f, loose: true },
+  mud: { name: 'Oasis mud', grip: 0.45, rollingResistance: 0.1, color: 0x6e4c35, loose: true },
+  salt: { name: 'Salt crust', grip: 0.95, rollingResistance: 0.015, color: 0xe8e0d0 },
+  rock: { name: 'Red rock', grip: 1.1, rollingResistance: 0.012, color: 0xa85848 },
   concrete: { name: 'Concrete', grip: 1.05, rollingResistance: 0.012, color: 0xcfc3ae },
   metal: { name: 'Scrap metal', grip: 0.85, rollingResistance: 0.012, color: 0x7d8a8c },
 };
 
-// World shape. The middle is a flat proving ground; dunes roll outward into a high rim at the edge.
-const TERRAIN_SIZE = 1400;       // m square
-const TERRAIN_CELLS = 140;       // 10 m facets
-const BASIN_RADIUS = 200;        // flat ground in the middle
-const DUNE_FULL_RADIUS = 340;    // dunes reach full height here
-const SAND_RADIUS = 230;         // past this the terrain counts as sand
-const RIM_START = 540;           // the ground climbs into a rim from here to the edge
-const RIM_HEIGHT = 70;
+// World shape: a 6 km valley, one through-line. The home basin (the Yard and its playground) sits
+// south-centre; a dune sea rolls away west; a salt pan and the dish field lie east; meadows and
+// marsh dips soften the south; and a winding red-rock canyon — the old trade road, marked by dead
+// pylons, watchtowers and banners — climbs north to the Spire, the landmark you can always see.
+// Mountains ring the whole valley. Regions blend by smooth masks; each is about one kind of driving.
+const WORLD = {
+  size: 6000, cells: 400,          // 15 m facets: region-scale forms, proving-ground detail lives in meshes
+  basinRadius: 380,                // dead-flat home ground around the start
+  duneSea: { start: 500, full: 1000, height: 42, wavelength: 520 },   // west: sharp-crested ridges
+  salt: { center: [1300, 300], radius: 650, height: 0.5 },            // east: the pan
+  canyon: { start: -500, full: -1800, width: 90, wallBase: 30, wallFull: 130, floorRise: 26 }, // the road north
+  east: { start: 700, full: 1200, height: 14 },                       // rolling ground out to the dish field
+  south: { start: 600, full: 1100 },                                  // meadows and marsh dips
+  rimStart: 2500, rimFull: 3000, rimHeight: 260,                      // the valley wall
+};
+const YARDANGS = { center: [-190, -160], radii: [130, 90], height: 7 };  // ridges run east–west
 const SEED = 20261003;
 
 // Feature layout. Positions are [x, z] in metres; the start line is at [0, 30] facing north (−Z).
@@ -39,55 +48,120 @@ const TABLE_TOPS = [
 ];
 const BOWL = { center: [125, 95], innerRadius: 26, width: 18, height: 9, backSlope: 20, segments: 96, radialSteps: 8 };
 const WASHBOARD = { at: [-135, 60], length: 72, width: 10, spacing: 2.4, bumpHeight: 0.22, bumpRadius: 0.6 };
-const SURFACE_LANES = { startZ: 62, length: 95, width: 16, lanes: [['concrete', -27], ['sand', -9], ['mud', 9], ['rock', 27]] };
+const SURFACE_LANES = { startZ: 62, length: 95, width: 16, lanes: [['concrete', -27], ['sand', -9], ['salt', 9], ['rock', 27]] };
 const START_PAD = { at: [0, 30], size: 24 };
 const GROUND_PADS = [{ at: [55, 25], radius: 5 }, { at: [-55, 25], radius: 5 }];
 const MESAS = [
   { at: [-210, -170], radius: 24, height: 28, sides: 9, pad: true },
   { at: [70, -290], radius: 13, height: 48, sides: 7, pad: true },
-  { at: [-60, 270], radius: 7, height: 70, sides: 6, pad: true },
-  { at: [270, -70], radius: 30, height: 18, sides: 10, pad: false },
-  { at: [-340, 60], radius: 40, height: 34, sides: 11, pad: false },
+  { at: [-60, 270], radius: 7, height: 70, sides: 6, pad: true },     // the town mesa, watching the Yard
+  { at: [-340, 60], radius: 40, height: 34, sides: 11, pad: false },  // the dune overlook
+  { at: [-1300, -250], radius: 30, height: 40, sides: 9, pad: false }, // an island in the sand sea, tall enough to top any dune
 ];
 const RING = { center: [0, 34, -240], radius: 14, tube: 1.4, segments: 24 };
 const ARCH = { at: [-150, 125], span: 26, height: 15 };
 const MAST = { at: [185, -160], height: 42 };
 const BURIED_TYRE = { at: [205, 215], radius: 9, tube: 3.2, segments: 18 };
-const ROCK_COUNT = 90;
-const SHRUB_COUNT = 320;
-const MOUNTAIN_COUNT = 28;
-const CLOUD_COUNT = 16;
+// The old trade road's furniture: watchtowers and a dead power line follow the canyon to the Spire,
+// and banner poles mark the way. Laid out along canyonPathX in buildTradeRoad().
+const ROAD_MARKS = [
+  { kind: 'tower', z: -420 },
+  { kind: 'tower', z: -1050 },
+  { kind: 'tower', z: -1700 },
+  { kind: 'pylonLine', fromZ: -350, toZ: -2200, every: 240, side: 45 },
+  { kind: 'banners', fromZ: -350, toZ: -2250, every: 200, side: 35 },
+];
+const POPLAR_GROVES = [
+  { at: [300, 900], count: 16 },
+  { at: [-400, 1300], count: 12 },
+  { at: [800, 1100], count: 10 },
+  { at: [850, 800], count: 10 },   // the salt shore grove, just off the pan's south-west corner
+  { at: [-155, -235], count: 10 }, // the yardang grove, near home
+];
+const ROCK_COUNT = 200;
+const SHRUB_COUNT = 900;
+const MOUNTAIN_COUNT = 44;
+const SNOW_HEIGHT = 300;       // peaks taller than this wear snow
+const CLOUD_COUNT = 26;
 const CRATE_SIZE = 1.2;
 const CRATE_MASS = 40;
 const BARREL_MASS = 30;
 const BEACON_PERIOD_SECONDS = 1.6;
 
+// The colossal things. The Spire is the through-line's end: 550 m at the head of the canyon, visible
+// from the start line. The dish field drinks the sun beyond the salt; a wrecked hull drowns in the
+// dune sea. Scenery only — the fog keeps them half-imagined.
+const SPIRE = { at: [0, -2350], height: 550, baseRadius: 22, topRadius: 4, crownRadius: 8 };
+const DISH_FARM = { center: [2100, 300], spread: 280, count: 16, minRadius: 26, maxRadius: 46 };
+const WRECK = { at: [-1800, 700], radius: 30, length: 240, heading: 0.7 };
+// The fallen ring: a section of the thing that broke, half-swallowed by the sand near the wreck,
+// with sandfalls pouring off its edge. The dune sea's one story.
+const FALLEN_RING = { at: [-2150, 250], radius: 120, tube: 18, arc: 1.2 };
+const SANDFALLS = [
+  { at: [-2060, 190], width: 10, height: 34, yaw: 0.7 },
+  { at: [-2120, 320], width: 13, height: 40, yaw: -0.4 },
+  { at: [-2210, 210], width: 9, height: 30, yaw: 1.6 },
+];
+// The Relay: a still-live gate on the dead trade road, halfway up the canyon, marking the mid-road pad.
+const RELAY = { z: -1400, halfWidth: 7, postHeight: 9 };
+// The giant's marbles: stone spheres the size of houses, half-buried in the southern meadows.
+const MARBLES = { at: [420, 820], spread: 130, count: 6, minRadius: 5, maxRadius: 9 };
+// Surge pads: plates of still-live ancient grid, strung along the through-route like waystations.
+// Pads on the road place their x from canyonPathX at build time.
+const BOOST_PADS = [
+  { at: [0, -95], radius: 4 },        // past the ramps, on the home straight
+  { at: [-95, -45], radius: 4 },      // the gap-jump run-up
+  { at: [125, 95], radius: 5 },       // in the bowl
+  { at: [-1600, 300], radius: 5 },    // the heart of the dune sea
+  { salt: true, radius: 8 },          // dead centre of the salt pan
+  { roadZ: -1400, radius: 5 },        // halfway up the trade road
+  { roadZ: -2250, radius: 6 },        // the Spire's foot
+];
+// The New Silk Road: an elevated freight line crossing the whole valley south of home, riding up and
+// over the dune sea, container pods gliding past day and night, too big and too indifferent to notice
+// a buggy. The community of 拾风 (Scrapwind Yard) squats just north of it.
+const SILK_LINE = { z: 215, clearance: 12, minHeight: 24, segmentLength: 100, from: -2500, to: 2500, podSpeed: 18, podOffsets: [0, 1700, 3400], podColors: [0xb85c42, 0x3f8f8a, 0xd8d2c4] };
+const SETTLEMENT = { center: [90, 172] };
+const STRING_POLES = [[-16, -10], [-4, -16], [8, -12], [14, 0], [6, 10], [-8, 8], [-16, -10]]; // a loop around the plaza, settlement-local
+
 const COLORS = {
-  ramp: 0x3f8f8a,
+  ramp: 0x2e7f7a,
   landing: 0x4f8a9a,
   tableTop: 0x4a7f8f,
-  bowl: 0xcdbb9e,
+  bowl: 0xb85c42,
   bump: 0x8a6f5e,
-  mesa: 0xb8643c,
-  rock: 0xa0705a,
+  mesa: 0xb0523a,
+  rock: 0x9c5848,
   pad: 0x2f3a3c,
   padMark: 0xf2d14b,
   ring: 0x7fe0d0,
-  mast: 0x9a4a32,
+  mast: 0x8a4a3a,
   tyre: 0x2a2522,
-  crate: 0xb07a45,
+  crate: 0xa8643c,
   barrel: 0xd0503a,
-  shrub: 0x7d8a3c,
-  mountain: 0xa07080,
+  shrub: 0x8a8a4a,
+  mountain: 0x8a4a52,
+  snow: 0xf5f2ee,
   cloud: 0xfff6ea,
   beacon: 0xff4a3a,
+  tower: 0xa88a62,
+  pylon: 0x5f6a70,
+  poplarTrunk: 0x5a4632,
+  poplarLeaf: 0xe8a33d,
+  megastructure: 0x2c2f33,
+  megastructureGlow: 0x54e8d8,
+  dish: 0xd8d2c4,
+  wreck: 0x4a3a30,
+  boostPad: 0x64ffe0,
 };
 
 /**
- * TestTrack: the proving ground. Builds the terrain, ramps, jumps, the banked bowl, the bumps, surface lanes,
- * mesas with landing pads and a few curiosities on the horizon, each as a mesh with a matching Rapier collider.
- * Wheels ask it what is under them (probeGround), ChaseCamera asks how high the ground is (heightAt),
- * and Game asks it to keep its loose props and blinking lights drawn (updateVisuals).
+ * TestTrack: the valley of 拾风. A 6 km world on one through-line — the home basin with its playground
+ * and the settlement, the dune sea west, the salt pan and dish field east, meadows south, and the old
+ * trade road winding north through a red-rock canyon to the Spire. Builds the terrain and every feature
+ * (ramps, jumps, bowl, lanes, mesas, the Silk Line freight railway, colossal structures, surge pads) as
+ * meshes with matching Rapier colliders. Wheels ask it what is under them (probeGround), ChaseCamera asks
+ * how high the ground is (heightAt), and Game asks it to keep its props, pods and lights drawn (updateVisuals).
  */
 export class TestTrack {
   world;
@@ -97,6 +171,11 @@ export class TestTrack {
   surfaces = new Map();  // collider handle → SURFACES entry
   props = [];            // [{ body, mesh }] loose things that get knocked about
   beacon;
+  spireCrown;
+  boostPadMaterial;
+  boostPads = [];        // [{ x, z, y, radius }] the surge pads a vehicle can charge from
+  silkPods = [];         // [{ body, group, offset, lane }] kinematic freight pods on the Silk Line
+  podClock = 0;          // seconds of simulated Silk Line time
 
   constructor(world, scene) {
     this.world = world;
@@ -111,9 +190,14 @@ export class TestTrack {
     this.buildSurfaceLanes();
     this.buildMesas();
     this.buildCuriosities();
+    this.buildLandmarks();
     this.scatterRocks();
     this.scatterShrubs();
     this.buildHorizon();
+    this.buildMegastructures();
+    this.buildSilkLine();
+    this.buildSettlement();
+    this.buildBoostPads();
     this.buildProps();
   }
 
@@ -156,12 +240,29 @@ export class TestTrack {
       prop.mesh.quaternion.copy(prop.body.rotation());
     }
     this.beacon.visible = (elapsedSeconds % BEACON_PERIOD_SECONDS) < BEACON_PERIOD_SECONDS * 0.35;
+    if (this.boostPadMaterial) {
+      this.boostPadMaterial.emissiveIntensity = 1.3 + 0.6 * Math.sin(elapsedSeconds * 3.2);
+    }
+    if (this.spireCrown) {
+      this.spireCrown.material.emissiveIntensity = 1.6 + 1.2 * Math.sin(elapsedSeconds * 0.9);
+    }
+    if (this.sandfallMaterial) {
+      this.sandfallMaterial.uniforms.uTime.value = elapsedSeconds;
+    }
+    for (const pod of this.silkPods) {
+      pod.group.position.copy(pod.body.translation());
+    }
+  }
+
+  /** The surge pad under this position, if any: close across the ground and not far above it. */
+  boostPadAt(position) {
+    return this.boostPads.find(pad =>
+      Math.hypot(position.x - pad.x, position.z - pad.z) < pad.radius
+      && Math.abs(position.y - pad.y) < 3) ?? null;
   }
 
   surfaceAt(collider, point) {
-    if (collider.handle === this.terrainCollider.handle) {
-      return Math.hypot(point.x, point.z) > SAND_RADIUS ? SURFACES.sand : SURFACES.dirt;
-    }
+    if (collider.handle === this.terrainCollider.handle) return terrainSurfaceAt(point.x, point.y, point.z);
     return this.surfaces.get(collider.handle) ?? SURFACES.dirt;
   }
 
@@ -232,7 +333,7 @@ export class TestTrack {
   // ---- The proving ground ----
 
   buildTerrain() {
-    const geometry = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, TERRAIN_CELLS, TERRAIN_CELLS);
+    const geometry = new THREE.PlaneGeometry(WORLD.size, WORLD.size, WORLD.cells, WORLD.cells);
     geometry.rotateX(-Math.PI / 2);
     const positions = geometry.attributes.position;
     for (let index = 0; index < positions.count; index++) {
@@ -421,9 +522,10 @@ export class TestTrack {
   scatterRocks() {
     for (let index = 0; index < ROCK_COUNT; index++) {
       const angle = this.random() * Math.PI * 2;
-      const distance = THREE.MathUtils.lerp(BASIN_RADIUS + 15, RIM_START + 60, this.random());
+      const distance = THREE.MathUtils.lerp(WORLD.basinRadius + 15, WORLD.rimStart - 100, this.random() ** 1.5);
       const x = Math.cos(angle) * distance;
       const z = Math.sin(angle) * distance;
+      if (z < WORLD.canyon.start && canyonCorridor(x, z) > 0.3) continue; // keep the road clear
       const size = THREE.MathUtils.lerp(1.2, 6.5, this.random() ** 2);
       const points = rockPoints(this.random, x, terrainHeight(x, z) + size * 0.25, z, size, size * 0.7, size);
       this.addConvex(points, COLORS.rock, 'rock', 0.05 + size * 0.015);
@@ -438,12 +540,14 @@ export class TestTrack {
     const matrix = new THREE.Matrix4();
     const bowlCenter = new THREE.Vector2(...BOWL.center);
     let placed = 0;
-    while (placed < SHRUB_COUNT) {
+    let guard = 0;
+    while (placed < SHRUB_COUNT && guard++ < SHRUB_COUNT * 4) {
       const angle = this.random() * Math.PI * 2;
-      const distance = THREE.MathUtils.lerp(150, RIM_START + 80, Math.sqrt(this.random()));
+      const distance = THREE.MathUtils.lerp(150, WORLD.rimStart - 100, Math.sqrt(this.random()));
       const x = Math.cos(angle) * distance;
       const z = Math.sin(angle) * distance;
       if (bowlCenter.distanceTo(new THREE.Vector2(x, z)) < BOWL.innerRadius + BOWL.width + BOWL.backSlope + 4) continue;
+      if (z < WORLD.canyon.start && canyonCorridor(x, z) > 0.3) continue; // keep the road clear
       const scale = THREE.MathUtils.lerp(0.6, 1.6, this.random());
       matrix.compose(
         new THREE.Vector3(x, terrainHeight(x, z), z),
@@ -452,21 +556,30 @@ export class TestTrack {
       );
       shrubs.setMatrixAt(placed++, matrix);
     }
+    shrubs.count = placed;
     this.scene.add(shrubs);
   }
 
-  /** Distant mountains and clouds: scenery only, there to make the horizon worth looking at. */
+  /** The valley wall: a ring of peaks outside the terrain rim, snow on the tall ones, wide clouds above. */
   buildHorizon() {
     const mountainMaterial = toonMaterial(COLORS.mountain);
+    const snowMaterial = toonMaterial(COLORS.snow);
     for (let index = 0; index < MOUNTAIN_COUNT; index++) {
-      const angle = (index / MOUNTAIN_COUNT) * Math.PI * 2 + this.random() * 0.15;
-      const distance = THREE.MathUtils.lerp(950, 1300, this.random());
-      const radius = THREE.MathUtils.lerp(120, 240, this.random());
-      const height = THREE.MathUtils.lerp(90, 230, this.random());
+      const angle = (index / MOUNTAIN_COUNT) * Math.PI * 2 + this.random() * 0.12;
+      const distance = THREE.MathUtils.lerp(2650, 3150, this.random());
+      const radius = THREE.MathUtils.lerp(180, 380, this.random());
+      const height = THREE.MathUtils.lerp(150, 420, this.random());
       const mountain = new THREE.Mesh(faceted(new THREE.ConeGeometry(radius, height, 6)), mountainMaterial);
-      mountain.position.set(Math.cos(angle) * distance, height / 2 - 10, Math.sin(angle) * distance);
+      mountain.position.set(Math.cos(angle) * distance, height / 2 - 20, Math.sin(angle) * distance);
       mountain.rotation.y = this.random() * Math.PI;
       this.scene.add(mountain);
+      if (height > SNOW_HEIGHT) {
+        const snowHeight = height * 0.28;
+        const snow = new THREE.Mesh(faceted(new THREE.ConeGeometry(radius * 0.34, snowHeight, 6)), snowMaterial);
+        snow.position.set(mountain.position.x, mountain.position.y + height / 2 - snowHeight / 2, mountain.position.z);
+        snow.rotation.y = mountain.rotation.y;
+        this.scene.add(snow);
+      }
     }
 
     const cloudMaterial = toonMaterial(COLORS.cloud, { fog: false });
@@ -474,15 +587,15 @@ export class TestTrack {
       const cloud = new THREE.Group();
       const puffs = 3 + Math.floor(this.random() * 4);
       for (let puff = 0; puff < puffs; puff++) {
-        const size = THREE.MathUtils.lerp(14, 30, this.random());
+        const size = THREE.MathUtils.lerp(20, 55, this.random());
         const mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(size, 0), cloudMaterial);
-        mesh.position.set(puff * size * 0.9, this.random() * 6, this.random() * 12);
-        mesh.scale.y = 0.55;
+        mesh.position.set(puff * size * 0.9, this.random() * 8, this.random() * 16);
+        mesh.scale.y = 0.5;
         cloud.add(mesh);
       }
       const angle = this.random() * Math.PI * 2;
-      const distance = THREE.MathUtils.lerp(250, 1000, this.random());
-      cloud.position.set(Math.cos(angle) * distance, THREE.MathUtils.lerp(170, 280, this.random()), Math.sin(angle) * distance);
+      const distance = THREE.MathUtils.lerp(400, 2700, this.random());
+      cloud.position.set(Math.cos(angle) * distance, THREE.MathUtils.lerp(260, 460, this.random()), Math.sin(angle) * distance);
       cloud.rotation.y = this.random() * Math.PI;
       this.scene.add(cloud);
     }
@@ -514,27 +627,585 @@ export class TestTrack {
     this.scene.add(mesh);
     this.props.push({ body, mesh });
   }
+
+  // ---- Gobi landmarks ----
+
+  /** The old trade road's furniture follows the canyon: watchtowers, the dead power line, waymark banners. */
+  buildLandmarks() {
+    for (const mark of ROAD_MARKS) {
+      if (mark.kind === 'tower') this.buildBeaconTower(canyonPathX(mark.z) + 30, mark.z);
+      if (mark.kind === 'pylonLine') {
+        for (let z = mark.fromZ; z >= mark.toZ; z -= mark.every) this.buildPylon(canyonPathX(z) + mark.side, z);
+      }
+      if (mark.kind === 'banners') this.buildBanners(mark);
+    }
+    this.buildRelay();
+    this.buildMarbles();
+    this.buildPoplarGroves();
+  }
+
+  /** The Relay: a live gate straddling the trade road at the mid-road surge pad. Drive through it. */
+  buildRelay() {
+    const { z, halfWidth, postHeight } = RELAY;
+    const x = canyonPathX(z);
+    const dx = (canyonPathX(z + 10) - canyonPathX(z - 10)) / 20; // the road's local slope
+    const yaw = Math.atan2(dx, 1); // the gate's beam lies across the road
+    const glowMaterial = toonMaterial(COLORS.megastructureGlow, { emissive: COLORS.megastructureGlow, emissiveIntensity: 1.3 });
+    const ground = (offsetX) => terrainHeight(x + offsetX, z);
+    for (const side of [-1, 1]) {
+      const post = toonMesh(new THREE.CylinderGeometry(0.35, 0.5, postHeight, 6), COLORS.megastructure, { outline: 0.08 });
+      post.position.set(x + side * halfWidth, ground(side * halfWidth) + postHeight / 2, z);
+      this.scene.add(post);
+      this.addFixed(null, RAPIER.ColliderDesc.cylinder(postHeight / 2, 0.5).setTranslation(x + side * halfWidth, ground(side * halfWidth) + postHeight / 2, z), 'metal');
+    }
+    const beam = new THREE.Mesh(new THREE.BoxGeometry(halfWidth * 2 + 1.5, 0.5, 0.7), glowMaterial);
+    beam.position.set(x, Math.min(ground(-halfWidth), ground(halfWidth)) + postHeight, z);
+    beam.rotation.y = yaw;
+    this.scene.add(beam);
+    const lintel = new THREE.Mesh(new THREE.BoxGeometry(halfWidth * 2 + 3, 0.35, 0.5), toonMaterial(COLORS.megastructure));
+    lintel.position.set(x, Math.min(ground(-halfWidth), ground(halfWidth)) + postHeight + 0.8, z);
+    lintel.rotation.y = yaw;
+    this.scene.add(lintel);
+  }
+
+  /** The giant's marbles: house-sized stone spheres half-buried in the southern meadows. */
+  buildMarbles() {
+    const { at, spread, count, minRadius, maxRadius } = MARBLES;
+    const material = toonMaterial(COLORS.rock);
+    for (let index = 0; index < count; index++) {
+      const angle = this.random() * Math.PI * 2;
+      const distance = Math.sqrt(this.random()) * spread;
+      const x = at[0] + Math.cos(angle) * distance;
+      const z = at[1] + Math.sin(angle) * distance;
+      const radius = THREE.MathUtils.lerp(minRadius, maxRadius, this.random());
+      const ground = terrainHeight(x, z);
+      const y = ground + radius * 0.55;
+      const marble = toonMesh(faceted(new THREE.SphereGeometry(radius, 10, 7)), material, { outline: radius * 0.05 });
+      marble.position.set(x, y, z);
+      this.scene.add(marble);
+      this.addFixed(null, RAPIER.ColliderDesc.ball(radius * 0.92).setTranslation(x, y, z), 'rock');
+    }
+  }
+
+  /** Journey-cloth waymarks along the road: tall poles, a small bright flag each, instanced for cheap. */
+  buildBanners({ fromZ, toZ, every, side }) {
+    const positions = [];
+    for (let z = fromZ, index = 0; z >= toZ; z -= every, index++) {
+      positions.push([canyonPathX(z) + (index % 2 === 0 ? -side : side), z]);
+    }
+    const poles = new THREE.InstancedMesh(
+      new THREE.CylinderGeometry(0.09, 0.12, 7, 5),
+      toonMaterial(0x5a4632),
+      positions.length,
+    );
+    const flags = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(1.6, 0.9, 0.06),
+      toonMaterial(COLORS.megastructureGlow, { emissive: COLORS.megastructureGlow, emissiveIntensity: 0.9 }),
+      positions.length,
+    );
+    const matrix = new THREE.Matrix4();
+    positions.forEach(([x, z], index) => {
+      const ground = terrainHeight(x, z);
+      poles.setMatrixAt(index, matrix.makeTranslation(x, ground + 3.5, z));
+      flags.setMatrixAt(index, matrix.makeTranslation(x + 0.85, ground + 6.2, z));
+    });
+    this.scene.add(poles, flags);
+  }
+
+  /** A rammed-earth watchtower: square, tapering, with a battlement ring on top. */
+  buildBeaconTower(x, z) {
+    const base = terrainHeight(x, z) - 1;
+    const tower = pointsOf(faceted(new THREE.CylinderGeometry(2.1, 3.0, 12, 4).rotateY(Math.PI / 4).translate(x, base + 6, z)));
+    this.addConvex(tower, COLORS.tower, 'rock', 0.1);
+    const cap = pointsOf(faceted(new THREE.CylinderGeometry(3.0, 2.3, 1.4, 4).rotateY(Math.PI / 4).translate(x, base + 12.6, z)));
+    this.addConvex(cap, COLORS.tower, 'rock', 0.08);
+  }
+
+  /** A dead transmission pylon: a tapered lattice mast with two crossarms, marching off to nowhere. */
+  buildPylon(x, z) {
+    const base = terrainHeight(x, z) - 1;
+    const body = pointsOf(faceted(new THREE.CylinderGeometry(0.55, 1.3, 26, 4).rotateY(Math.PI / 4).translate(x, base + 13, z)));
+    this.addConvex(body, COLORS.pylon, 'metal', 0.06);
+    for (const [level, span] of [[18, 6.5], [22, 4.5]]) {
+      const arm = pointsOf(faceted(new THREE.BoxGeometry(span, 0.5, 0.5).translate(x, base + level, z)));
+      this.addConvex(arm, COLORS.pylon, 'metal', 0.05);
+    }
+  }
+
+  /** Desert poplars in autumn gold: clusters along the salt lake's shore. Decoration only — drive through them. */
+  buildPoplarGroves() {
+    const total = POPLAR_GROVES.reduce((sum, grove) => sum + grove.count, 0);
+    const trunks = new THREE.InstancedMesh(
+      faceted(new THREE.CylinderGeometry(0.22, 0.42, 4.4, 5).translate(0, 2.2, 0)),
+      toonMaterial(COLORS.poplarTrunk), total,
+    );
+    const canopies = new THREE.InstancedMesh(faceted(new THREE.IcosahedronGeometry(2.0, 0)), toonMaterial(COLORS.poplarLeaf), total);
+    trunks.castShadow = canopies.castShadow = true;
+    const matrix = new THREE.Matrix4();
+    let placed = 0;
+    for (const grove of POPLAR_GROVES) {
+      for (let index = 0; index < grove.count; index++) {
+        const angle = this.random() * Math.PI * 2;
+        const distance = Math.sqrt(this.random()) * 26;
+        const x = grove.at[0] + Math.cos(angle) * distance;
+        const z = grove.at[1] + Math.sin(angle) * distance;
+        const scale = THREE.MathUtils.lerp(0.75, 1.5, this.random());
+        const ground = terrainHeight(x, z);
+        matrix.compose(new THREE.Vector3(x, ground, z), new THREE.Quaternion(), new THREE.Vector3(scale, scale, scale));
+        trunks.setMatrixAt(placed, matrix);
+        matrix.compose(
+          new THREE.Vector3(x, ground + 4.4 * scale, z),
+          new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.random() * Math.PI),
+          new THREE.Vector3(scale * THREE.MathUtils.lerp(0.8, 1.3, this.random()), scale * THREE.MathUtils.lerp(0.9, 1.6, this.random()), scale),
+        );
+        canopies.setMatrixAt(placed++, matrix);
+      }
+    }
+    this.scene.add(trunks, canopies);
+  }
+
+  // ---- The colossal ----
+
+  /** The things too big to argue with: the dish farm, the wreck, the fallen ring, and the Spire. */
+  buildMegastructures() {
+    this.buildDishFarm();
+    this.buildWreck();
+    this.buildFallenRing();
+    this.buildSpire();
+  }
+
+  /** A broken section of the ringway, lying where it fell in the deep dunes, sandfalls pouring off it. */
+  buildFallenRing() {
+    const [x, z] = FALLEN_RING.at;
+    const ground = terrainHeight(x, z);
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(FALLEN_RING.radius, FALLEN_RING.tube, 12, 48, FALLEN_RING.arc),
+      toonMaterial(COLORS.megastructure),
+    );
+    ring.position.set(x, ground - FALLEN_RING.tube * 1.6, z);
+    ring.rotation.set(0.95, 0.55, 0.3);
+    this.scene.add(ring);
+
+    // Sandfalls: bright curtains of pouring sand hanging off the dune crests nearby.
+    this.sandfallMaterial = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      uniforms: { uTime: { value: 0 } },
+      vertexShader: /* glsl */ `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform float uTime;
+        varying vec2 vUv;
+        void main() {
+          float flow = fract(vUv.y * 3.0 + uTime * 0.35 + sin(vUv.x * 21.0) * 0.06);
+          float bands = smoothstep(0.25, 0.5, flow) * (1.0 - smoothstep(0.55, 0.8, flow));
+          float edges = smoothstep(0.0, 0.2, vUv.x) * (1.0 - smoothstep(0.8, 1.0, vUv.x))
+            * smoothstep(0.0, 0.25, vUv.y);
+          float alpha = bands * edges * 0.5;
+          gl_FragColor = vec4(vec3(0.94, 0.78, 0.55) * (0.75 + 0.25 * bands), alpha);
+        }
+      `,
+    });
+    for (const fall of SANDFALLS) {
+      const curtain = new THREE.Mesh(new THREE.PlaneGeometry(fall.width, fall.height), this.sandfallMaterial);
+      const groundHere = terrainHeight(fall.at[0], fall.at[1]);
+      curtain.position.set(fall.at[0], groundHere + fall.height / 2 - 6, fall.at[1]);
+      curtain.rotation.y = fall.yaw;
+      this.scene.add(curtain);
+    }
+  }
+
+  /** Giant dead dishes in the deep dunes, still tipped toward the sun they were built to drink. */
+  buildDishFarm() {
+    const { center, spread, count, minRadius, maxRadius } = DISH_FARM;
+    const dishMaterial = toonMaterial(COLORS.dish, { side: THREE.DoubleSide });
+    const pylonMaterial = toonMaterial(COLORS.megastructure);
+    const glowMaterial = toonMaterial(COLORS.megastructureGlow, { emissive: COLORS.megastructureGlow, emissiveIntensity: 0.7 });
+    for (let index = 0; index < count; index++) {
+      const angle = this.random() * Math.PI * 2;
+      const distance = Math.sqrt(this.random()) * spread;
+      const x = center[0] + Math.cos(angle) * distance;
+      const z = center[1] + Math.sin(angle) * distance;
+      const base = terrainHeight(x, z) - 2;
+      const radius = THREE.MathUtils.lerp(minRadius, maxRadius, this.random());
+      const pylonHeight = radius * 0.8;
+
+      const dish = new THREE.Group();
+      const pylon = new THREE.Mesh(new THREE.CylinderGeometry(radius * 0.09, radius * 0.14, pylonHeight, 8), pylonMaterial);
+      pylon.position.y = pylonHeight / 2;
+      dish.add(pylon);
+      const bowl = new THREE.Mesh(faceted(new THREE.SphereGeometry(radius, 14, 6, 0, Math.PI * 2, 0, 0.5)), dishMaterial);
+      bowl.position.y = pylonHeight;
+      bowl.rotation.set(0.55, 0, -0.25); // tipped sunward, frozen mid-drink
+      if (index % 3 === 0) {
+        const lip = new THREE.Mesh(new THREE.TorusGeometry(radius * Math.sin(0.5), radius * 0.02, 6, 28).rotateX(Math.PI / 2), glowMaterial);
+        lip.position.y = radius * Math.cos(0.5);
+        bowl.add(lip);
+      }
+      dish.add(bowl);
+      dish.position.set(x, base, z);
+      dish.rotation.y = this.random() * 0.6 - 0.3;
+      this.scene.add(dish);
+      this.addFixed(null, RAPIER.ColliderDesc.cylinder(pylonHeight / 2, radius * 0.12).setTranslation(x, base + pylonHeight / 2, z), 'metal');
+    }
+  }
+
+  /** A wrecked hull the size of a town block, half-swallowed by the western dune sea. */
+  buildWreck() {
+    const { at, radius, length, heading } = WRECK;
+    const group = new THREE.Group();
+    const hullGeometry = faceted(new THREE.CylinderGeometry(radius, radius * 0.85, length, 12, 1, true));
+    hullGeometry.rotateZ(Math.PI / 2); // the hull lies on its side, axis along X
+    group.add(new THREE.Mesh(hullGeometry, toonMaterial(COLORS.wreck, { side: THREE.DoubleSide })));
+    for (const [offset, roll] of [[-length * 0.3, 0.1], [0, -0.06], [length * 0.32, 0.18]]) {
+      const rib = new THREE.Mesh(new THREE.TorusGeometry(radius * 1.04, 2.2, 6, 28, 4.4).rotateY(Math.PI / 2), toonMaterial(COLORS.megastructure));
+      rib.position.x = offset;
+      rib.rotation.x = roll;
+      group.add(rib);
+    }
+    const ground = terrainHeight(at[0], at[1]);
+    group.position.set(at[0], ground + radius * 0.25, at[1]);
+    group.rotation.set(0, heading, 0.1);
+    this.scene.add(group);
+  }
+
+  /** One immense spire where the dead power line was always heading. Its crown still breathes. */
+  buildSpire() {
+    const [x, z] = SPIRE.at;
+    const base = terrainHeight(x, z) - 2;
+    const tower = new THREE.Mesh(
+      faceted(new THREE.CylinderGeometry(SPIRE.topRadius, SPIRE.baseRadius, SPIRE.height, 6)),
+      toonMaterial(COLORS.megastructure),
+    );
+    tower.position.set(x, base + SPIRE.height / 2, z);
+    this.scene.add(tower);
+    this.spireCrown = new THREE.Mesh(
+      new THREE.SphereGeometry(SPIRE.crownRadius, 10, 8),
+      toonMaterial(COLORS.megastructureGlow, { emissive: COLORS.megastructureGlow, emissiveIntensity: 1.6 }),
+    );
+    this.spireCrown.position.set(x, base + SPIRE.height + SPIRE.crownRadius * 0.6, z);
+    this.scene.add(this.spireCrown);
+    this.addFixed(null, RAPIER.ColliderDesc.cylinder(SPIRE.height / 2, SPIRE.baseRadius * 0.7).setTranslation(x, base + SPIRE.height / 2, z), 'metal');
+  }
+
+  // ---- The New Silk Road and its community ----
+
+  /**
+   * The elevated freight line, riding up and over the dunes on a smoothed profile: deck segments that
+   * pitch with the ground, pylons where the ground falls away, portals where it vanishes into the
+   * range, and pods that never stop for anyone.
+   */
+  buildSilkLine() {
+    const { z, clearance, minHeight, segmentLength, from, to, podOffsets, podColors } = SILK_LINE;
+    const concrete = toonMaterial(0xcfc3ae);
+    const glowMaterial = toonMaterial(COLORS.megastructureGlow, { emissive: COLORS.megastructureGlow, emissiveIntensity: 0.8 });
+    const count = Math.round((to - from) / segmentLength);
+
+    // The profile: clear the highest ground in each segment, then smooth so the pods don't stair-step.
+    const heights = [];
+    for (let index = 0; index <= count; index++) {
+      const x = from + index * segmentLength;
+      heights.push(Math.max(minHeight, terrainHeight(x, z) + clearance));
+    }
+    for (let pass = 0; pass < 3; pass++) {
+      for (let index = 1; index < count; index++) {
+        heights[index] = Math.max(minHeight, (heights[index - 1] + heights[index] * 2 + heights[index + 1]) / 4);
+      }
+    }
+    this.silkHeights = { from, segmentLength, heights };
+
+    for (let index = 0; index < count; index++) {
+      const x = from + (index + 0.5) * segmentLength;
+      const pitch = Math.atan2(heights[index + 1] - heights[index], segmentLength);
+      const deck = new THREE.Mesh(new THREE.BoxGeometry(segmentLength + 2, 1.4, 9), concrete);
+      deck.position.set(x, (heights[index] + heights[index + 1]) / 2, z);
+      deck.rotation.z = pitch;
+      this.scene.add(deck);
+      if (index % 2 === 0) {
+        const strip = new THREE.Mesh(new THREE.BoxGeometry(segmentLength / 2, 0.18, 0.18), glowMaterial);
+        strip.position.set(0, 0.85, -4.3);
+        deck.add(strip);
+      }
+      const ground = terrainHeight(from + index * segmentLength, z) - 2;
+      const pylonHeight = heights[index] - ground;
+      if (pylonHeight > 5) {
+        const px = from + index * segmentLength;
+        const pylon = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 2.4, pylonHeight, 8), concrete);
+        pylon.position.set(px, ground + pylonHeight / 2, z);
+        this.scene.add(pylon);
+        this.addFixed(null, RAPIER.ColliderDesc.cylinder(pylonHeight / 2, 1.9).setTranslation(px, ground + pylonHeight / 2, z), 'concrete');
+      }
+    }
+    // Where the line meets the valley wall it dives into a portal, not a dead end.
+    for (const end of [from, to]) {
+      const portal = toonMesh(new THREE.BoxGeometry(6, 22, 16), COLORS.megastructure, { outline: 0.3 });
+      portal.position.set(end, terrainHeight(end, z) + 9, z);
+      this.scene.add(portal);
+    }
+
+    podOffsets.forEach((offset, index) => {
+      const pod = new THREE.Group();
+      pod.add(toonMesh(new THREE.BoxGeometry(7, 2.6, 3.1), podColors[index % podColors.length], { outline: 0.1 }));
+      const strip = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.5, 2.6), glowMaterial);
+      strip.position.x = 3.6;
+      pod.add(strip);
+      // Start each pod where its animation phase puts it, so nothing snaps on the first step.
+      const span = to - from;
+      const startX = from + ((offset % span) + span) % span;
+      pod.position.set(startX, this.silkLineYAt(startX) + 2.1, z + (index % 2 === 0 ? -1.8 : 1.8));
+      this.scene.add(pod);
+      // Pods are real kinematic bodies: get in the way of the Silk Road and it will move *you*.
+      const body = this.world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased()
+        .setTranslation(pod.position.x, pod.position.y, pod.position.z));
+      this.world.createCollider(RAPIER.ColliderDesc.cuboid(3.5, 1.3, 1.55).setMass(8000), body);
+      this.silkPods.push({ body, group: pod, offset, lane: pod.position.z });
+    });
+  }
+
+  /** Advances the pod clock and claims each pod's next kinematic pose; Game calls this before world.step. */
+  stepPods(dt) {
+    this.podClock += dt;
+    const span = SILK_LINE.to - SILK_LINE.from;
+    for (const pod of this.silkPods) {
+      const x = SILK_LINE.from + ((this.podClock * SILK_LINE.podSpeed + pod.offset) % span);
+      const y = this.silkLineYAt(x) + 2.1;
+      pod.body.setNextKinematicTranslation({ x, y, z: pod.lane });
+    }
+  }
+
+  /** The deck's height above datum at x, interpolating the smoothed segment profile. */
+  silkLineYAt(x) {
+    const { from, segmentLength, heights } = this.silkHeights;
+    const t = THREE.MathUtils.clamp((x - from) / segmentLength, 0, heights.length - 1.001);
+    const index = Math.floor(t);
+    return THREE.MathUtils.lerp(heights[index], heights[index + 1], t - index);
+  }
+
+  /** 拾风 — Scrapwind Yard: container homes, work canopies, string lights and a gate sign, north of the line. */
+  buildSettlement() {
+    const [centerX, centerZ] = SETTLEMENT.center;
+    const ground = (x, z) => terrainHeight(x, z);
+    const at = (local, y = 0) => new THREE.Vector3(centerX + local[0], ground(centerX + local[0], centerZ + local[1]) + y, centerZ + local[1]);
+
+    // Container buildings, two of them stacked.
+    const containers = [
+      { local: [-14, -6], size: [7, 2.8, 3], color: 0xb85c42, heading: 0.08 },
+      { local: [-13.5, -1.6], size: [7, 2.8, 3], color: 0x3f8f8a, heading: -0.04 },
+      { local: [-13.5, -1.6], size: [7, 2.8, 3], color: 0xd8d2c4, heading: 0.03, lift: 2.8 },
+      { local: [12, -8], size: [6, 2.6, 3], color: 0xd8d2c4, heading: -0.5 },
+      { local: [16, 2], size: [7, 2.8, 3], color: 0xb85c42, heading: 0.35 },
+      { local: [-2, 14], size: [6, 2.6, 3], color: 0x3f8f8a, heading: 1.1 },
+    ];
+    for (const box of containers) {
+      this.addBox(new THREE.Vector3(...box.size), at(box.local, box.size[1] / 2 + (box.lift ?? 0)),
+        new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), box.heading), box.color, 'metal', 0.06);
+    }
+
+    // Work canopies: a flat roof on poles, one wearing solar tiles, one sheltering the charge point.
+    for (const [local, solar] of [[[-2, -2], true], [[8, 6], false]]) {
+      const origin = at(local);
+      const roof = toonMesh(new THREE.BoxGeometry(6, 0.15, 5), 0xd8d2c4, { outline: 0.04 });
+      roof.position.copy(origin).y += 3;
+      this.scene.add(roof);
+      for (const [dx, dz] of [[-2.7, -2.2], [2.7, -2.2], [-2.7, 2.2], [2.7, 2.2]]) {
+        const pole = toonMesh(new THREE.CylinderGeometry(0.07, 0.07, 3, 6), 0x5f6a70, { outline: 0 });
+        pole.position.copy(origin).add(new THREE.Vector3(dx, 1.5, dz));
+        this.scene.add(pole);
+      }
+      if (solar) {
+        for (const dx of [-1.5, 0, 1.5]) {
+          const tile = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.05, 4.4), toonMaterial(0x24344a));
+          tile.position.copy(origin).add(new THREE.Vector3(dx, 3.15, 0));
+          tile.rotation.z = 0.18;
+          this.scene.add(tile);
+        }
+      }
+    }
+
+    // The water tank, on legs.
+    const tankOrigin = at([2, -14]);
+    const tank = toonMesh(new THREE.CylinderGeometry(1.6, 1.6, 2.6, 10), 0x8a9496, { outline: 0.06 });
+    tank.position.copy(tankOrigin).y += 3.4;
+    this.scene.add(tank);
+    for (const [dx, dz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+      const leg = toonMesh(new THREE.CylinderGeometry(0.09, 0.09, 2.2, 6), 0x5f6a70, { outline: 0 });
+      leg.position.copy(tankOrigin).add(new THREE.Vector3(dx, 1.1, dz));
+      this.scene.add(leg);
+    }
+
+    // String lights around the plaza.
+    const bulbMaterial = toonMaterial(0xffd9a0, { emissive: 0xffd9a0, emissiveIntensity: 1.6 });
+    const bulbs = [];
+    const poleTops = STRING_POLES.map(local => at(local, 3.6));
+    for (let pole = 0; pole < poleTops.length - 1; pole++) {
+      for (let step = 1; step < 12; step++) {
+        const t = step / 12;
+        const point = poleTops[pole].clone().lerp(poleTops[pole + 1], t);
+        point.y -= Math.sin(Math.PI * t) * 1.1; // the sag of the wire
+        bulbs.push(point);
+      }
+    }
+    const bulbMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(0.09, 6, 4), bulbMaterial, bulbs.length);
+    const matrix = new THREE.Matrix4();
+    bulbs.forEach((point, index) => bulbMesh.setMatrixAt(index, matrix.makeTranslation(point.x, point.y, point.z)));
+    this.scene.add(bulbMesh);
+    for (const top of poleTops) {
+      const pole = toonMesh(new THREE.CylinderGeometry(0.06, 0.08, 3.6, 6), 0x5a4632, { outline: 0 });
+      pole.position.set(top.x, top.y - 1.8, top.z);
+      this.scene.add(pole);
+    }
+
+    // The gate sign on the road in: 拾风, "gathering wind" — what the Yard calls itself.
+    const signOrigin = at([-20, 6]);
+    const board = new THREE.Mesh(
+      new THREE.BoxGeometry(4.6, 2.3, 0.15),
+      new THREE.MeshBasicMaterial({ map: signTexture('拾风', 'SCRAPWIND YARD') }),
+    );
+    board.position.copy(signOrigin).y += 3.2;
+    board.rotation.y = 0.9;
+    this.scene.add(board);
+    for (const dx of [-1.9, 1.9]) {
+      const post = toonMesh(new THREE.CylinderGeometry(0.09, 0.11, 4.4, 6), 0x5a4632, { outline: 0 });
+      post.position.copy(signOrigin).add(new THREE.Vector3(dx, 2.2, 0));
+      this.scene.add(post);
+    }
+    const chargeSign = new THREE.Mesh(
+      new THREE.BoxGeometry(1.8, 0.9, 0.1),
+      new THREE.MeshBasicMaterial({ map: signTexture('充电', 'CHARGE') }),
+    );
+    chargeSign.position.copy(at([-2, -2], 2.2));
+    this.scene.add(chargeSign);
+  }
+
+  /** Glowing hex plates that refill a vehicle's surge capacitors: the old grid, still generous. */
+  buildBoostPads() {
+    this.boostPadMaterial = toonMaterial(COLORS.boostPad, { emissive: COLORS.boostPad, emissiveIntensity: 1.3 });
+    const baseMaterial = toonMaterial(COLORS.pad);
+    for (const pad of BOOST_PADS) {
+      const x = pad.at ? pad.at[0] : pad.salt ? WORLD.salt.center[0] : canyonPathX(pad.roadZ);
+      const z = pad.at ? pad.at[1] : pad.salt ? WORLD.salt.center[1] : pad.roadZ;
+      const y = terrainHeight(x, z);
+      const base = new THREE.Mesh(new THREE.CylinderGeometry(pad.radius, pad.radius * 1.08, 0.12, 6), baseMaterial);
+      base.position.set(x, y + 0.06, z);
+      this.scene.add(base);
+      const plate = new THREE.Mesh(new THREE.CylinderGeometry(pad.radius * 0.72, pad.radius * 0.72, 0.06, 6), this.boostPadMaterial);
+      plate.position.set(x, y + 0.15, z);
+      this.scene.add(plate);
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(pad.radius * 0.9, 0.1, 6, 24).rotateX(Math.PI / 2), this.boostPadMaterial);
+      ring.position.set(x, y + 0.16, z);
+      this.scene.add(ring);
+      this.boostPads.push({ x, z, y, radius: pad.radius });
+    }
+  }
+}
+
+/** The old trade road through the canyon: where the canyon floor's x wanders as it runs north (−z). */
+function canyonPathX(z) {
+  return 150 * Math.sin(z * 0.0011) + 60 * Math.sin(z * 0.0027 + 1.7);
+}
+
+/** How deep (x, z) sits inside the canyon corridor: 1 on the road, 0 in the walls. */
+function canyonCorridor(x, z) {
+  return Math.exp(-(((x - canyonPathX(z)) / WORLD.canyon.width) ** 2));
 }
 
 /** Ground height of the bare terrain at (x, z), before any features sit on it. */
 export function terrainHeight(x, z) {
   const distance = Math.hypot(x, z);
-  const duneAmount = smoothstep(BASIN_RADIUS, DUNE_FULL_RADIUS, distance);
-  const dunes = 7 * Math.sin(x * 0.021 + 1.3) * Math.cos(z * 0.017)
-    + 4 * Math.sin((x + z) * 0.043)
-    + 2.5 * Math.sin(x * 0.09 - z * 0.05);
-  const rim = smoothstep(RIM_START, TERRAIN_SIZE / 2, Math.max(Math.abs(x), Math.abs(z))) * RIM_HEIGHT;
-  return duneAmount * (dunes + 6) + rim;
+
+  // West: the dune sea — long sharp-crested ridges, big enough to surf and to get lost in.
+  const duneMask = smoothstep(WORLD.duneSea.start, WORLD.duneSea.full, -x);
+  const ridgePhase = (x * 0.8 + z * 0.6) * (Math.PI * 2 / WORLD.duneSea.wavelength) + Math.sin(z * 0.004) * 0.8;
+  const duneSea = duneMask * (Math.pow(Math.abs(Math.sin(ridgePhase)), 0.75) * WORLD.duneSea.height
+    + 8 * Math.sin(x * 0.006) * Math.cos(z * 0.005));
+
+  // South: soft meadows with marsh dips sunk into them.
+  const southMask = smoothstep(WORLD.south.start, WORLD.south.full, z);
+  const meadow = southMask * (4 * Math.sin(x * 0.01 + 2) * Math.cos(z * 0.008)
+    - 2.5 * Math.pow(Math.max(0, Math.sin(x * 0.017 - z * 0.013)), 2));
+
+  // North: red rock rising, with the trade-road corridor carved through it and climbing gently.
+  const northMask = smoothstep(-WORLD.canyon.start, -WORLD.canyon.full, -z);
+  const corridor = canyonCorridor(x, z);
+  const wallGrowth = smoothstep(-WORLD.canyon.start, WORLD.canyon.full, z);
+  const wallHeight = WORLD.canyon.wallBase + (WORLD.canyon.wallFull - WORLD.canyon.wallBase) * wallGrowth;
+  const canyon = northMask * (
+    wallHeight * (1 - corridor) * (1 + 0.18 * Math.sin(x * 0.03) * Math.sin(z * 0.024))
+    + corridor * wallGrowth * WORLD.canyon.floorRise
+  );
+
+  // East: rolling ground climbing toward the dish field.
+  const eastRoll = smoothstep(WORLD.east.start, WORLD.east.full, x)
+    * (WORLD.east.height + 6 * Math.sin(x * 0.008) * Math.sin(z * 0.006));
+
+  // Everywhere ends at the valley wall: a jagged mountain ring.
+  const rimT = smoothstep(WORLD.rimStart, WORLD.rimFull, Math.max(Math.abs(x), Math.abs(z)));
+  const rim = rimT * (WORLD.rimHeight + 120 * Math.sin(Math.atan2(z, x) * 7 + 1) + 60 * Math.sin(x * 0.01) * Math.sin(z * 0.009));
+
+  let height = duneSea + meadow + canyon + eastRoll + rim;
+
+  // The salt pan is pressed dead flat into whatever was there.
+  const [saltX, saltZ] = WORLD.salt.center;
+  const saltMask = 1 - smoothstep(WORLD.salt.radius * 0.75, WORLD.salt.radius, Math.hypot(x - saltX, z - saltZ));
+  height = THREE.MathUtils.lerp(height, WORLD.salt.height, saltMask);
+
+  // The home basin flattens everything around the start.
+  const basinMask = 1 - smoothstep(WORLD.basinRadius * 0.8, WORLD.basinRadius, distance);
+  return THREE.MathUtils.lerp(height, 0, basinMask) + yardangHeight(x, z);
 }
 
+/** Yardangs: sharp-crested ridges the wind carved out of the hardpan, running east–west. */
+function yardangHeight(x, z) {
+  const nx = (x - YARDANGS.center[0]) / YARDANGS.radii[0];
+  const nz = (z - YARDANGS.center[1]) / YARDANGS.radii[1];
+  const within = 1 - smoothstep(0.7, 1, Math.hypot(nx, nz));
+  if (within <= 0) return 0;
+  const ridge = Math.pow(Math.max(0, Math.sin(z * 0.105)), 1.5) + 0.35 * Math.pow(Math.max(0, Math.sin(z * 0.105 + x * 0.02)), 2);
+  return within * ridge * YARDANGS.height;
+}
+
+// The palette: a color script along the road — gold home, white salt, red canyon, pale ash east.
+const DUNE_GOLD = new THREE.Color(0xe0b070);
+const MEADOW_OLIVE = new THREE.Color(0xa89a5a);
+const CANYON_RED = new THREE.Color(0xa8503c);
+const ASH_PALE = new THREE.Color(0xb8b0a4);
+const RIM_DARK = new THREE.Color(0x6e4438);
+const SNOW = new THREE.Color(0xf5f2ee);
+
 function terrainColor(x, y, z, random, target) {
-  const distance = Math.hypot(x, z);
-  const sandiness = smoothstep(BASIN_RADIUS - 20, SAND_RADIUS + 40, distance);
-  const rimness = smoothstep(RIM_START - 40, TERRAIN_SIZE / 2, Math.max(Math.abs(x), Math.abs(z)));
-  target.set(SURFACES.dirt.color).lerp(new THREE.Color(SURFACES.sand.color), sandiness).lerp(new THREE.Color(0xd4845a), rimness);
-  const crest = THREE.MathUtils.clamp((y - 4) / 14, 0, 1) * 0.08;
+  target.set(SURFACES.dirt.color);
+  target.lerp(DUNE_GOLD, smoothstep(450, 900, -x));
+  target.lerp(MEADOW_OLIVE, smoothstep(WORLD.south.start, WORLD.south.full, z) * 0.55);
+  target.lerp(CANYON_RED, smoothstep(-WORLD.canyon.start, -900, -z) * THREE.MathUtils.clamp(y / 50, 0, 1));
+  target.lerp(ASH_PALE, smoothstep(1700, 2300, x) * 0.7);
+  const [saltX, saltZ] = WORLD.salt.center;
+  const saltMask = 1 - smoothstep(WORLD.salt.radius * 0.7, WORLD.salt.radius, Math.hypot(x - saltX, z - saltZ));
+  target.lerp(new THREE.Color(SURFACES.salt.color), saltMask);
+  target.lerp(RIM_DARK, smoothstep(120, 260, y));
+  target.lerp(SNOW, smoothstep(300, 380, y));
+  // Yardang hardpan runs grey-red; dune crests catch the light.
+  const nx = (x - YARDANGS.center[0]) / YARDANGS.radii[0];
+  const nz = (z - YARDANGS.center[1]) / YARDANGS.radii[1];
+  target.lerp(new THREE.Color(0x9a7a62), (1 - smoothstep(0.6, 1, Math.hypot(nx, nz))) * 0.5);
+  const crest = THREE.MathUtils.clamp(y / 45, 0, 1) * 0.1;
   const speckle = (random() - 0.5) * 0.07;
   return target.offsetHSL(0, 0, crest + speckle);
+}
+
+/** What the tyres feel on the bare terrain at (x, y, z): salt, marsh mud, sea sand, high rock, else gravel. */
+function terrainSurfaceAt(x, y, z) {
+  const [saltX, saltZ] = WORLD.salt.center;
+  if (Math.hypot(x - saltX, z - saltZ) < WORLD.salt.radius) return SURFACES.salt;
+  if (z > WORLD.south.start && y < -1.2) return SURFACES.mud;
+  if (smoothstep(WORLD.duneSea.start, WORLD.duneSea.full, -x) > 0.4) return SURFACES.sand;
+  if (y > 22 && !(z < WORLD.canyon.start && canyonCorridor(x, z) > 0.5)) return SURFACES.rock;
+  return SURFACES.dirt;
 }
 
 /** A wedge with its low edge across the origin, rising toward −Z: heights at the near and far edges. */
@@ -571,6 +1242,30 @@ function pointsOf(geometry) {
   const points = [];
   for (let index = 0; index < positions.count; index++) points.push(new THREE.Vector3().fromBufferAttribute(positions, index));
   return points;
+}
+
+/** A painted sign board: Chinese title over a latin caption, on dark teal with a glowing frame. */
+function signTexture(title, caption) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 256;
+  const context = canvas.getContext('2d');
+  context.fillStyle = '#20303a';
+  context.fillRect(0, 0, 512, 256);
+  context.strokeStyle = '#54e8d8';
+  context.lineWidth = 10;
+  context.strokeRect(14, 14, 484, 228);
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
+  context.fillStyle = '#eaf6f2';
+  context.font = 'bold 110px "Noto Sans CJK SC", "WenQuanYi Micro Hei", "PingFang SC", sans-serif';
+  context.fillText(title, 256, 105);
+  context.fillStyle = '#54e8d8';
+  context.font = 'bold 42px sans-serif';
+  context.fillText(caption, 256, 200);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
 }
 
 function jitter(random, amount) {

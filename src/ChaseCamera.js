@@ -9,8 +9,11 @@ export const cameraTuning = {
   baseFov: 64,            // degrees
   speedFov: 16,           // extra degrees at fovTopSpeed, for a sense of speed
   fovTopSpeed: 45,        // m/s
+  boostFov: 7,            // extra degrees while boosting
+  boostPullback: 0.9,     // m the camera falls back while boosting
+  boostResponse: 6,       // 1/s, how quickly the boost kick comes and goes
   orbitSpeed: 2.6,        // rad/s from the right stick
-  orbitReturn: 2.5,       // 1/s back to centre once the stick is released
+  orbitReturn: 2.5,        // 1/s back to centre once the stick is released
 };
 
 const MIN_GROUND_CLEARANCE = 1.0;
@@ -32,19 +35,22 @@ export class ChaseCamera {
   orbitPitch = 0;
   position = new THREE.Vector3();
   placed = false;
+  boostBlend = 0;        // 0..1, eased in and out while boost is held
 
   constructor(camera, track) {
     this.camera = camera;
     this.track = track;
   }
 
-  /** Moves the camera toward its spot behind the target. lookRight and lookUp are -1..1 stick values. */
-  update(targetPosition, targetQuaternion, speed, lookRight, lookUp, dt) {
+  /** Moves the camera toward its spot behind the target. lookRight and lookUp are -1..1 stick values; boosting is 0 or 1. */
+  update(targetPosition, targetQuaternion, speed, lookRight, lookUp, dt, boosting = 0) {
     this.followHeading(targetQuaternion, dt);
     this.orbit(lookRight, lookUp, dt);
+    this.boostBlend += (boosting - this.boostBlend) * (1 - Math.exp(-cameraTuning.boostResponse * dt));
 
     const yaw = this.heading + this.orbitYaw;
-    const horizontal = cameraTuning.distance * Math.cos(this.orbitPitch);
+    const distance = cameraTuning.distance + cameraTuning.boostPullback * this.boostBlend;
+    const horizontal = distance * Math.cos(this.orbitPitch);
     const desired = new THREE.Vector3(Math.sin(yaw) * horizontal, cameraTuning.height + cameraTuning.distance * Math.sin(this.orbitPitch), Math.cos(yaw) * horizontal)
       .add(targetPosition);
     desired.y = Math.max(desired.y, this.track.heightAt(desired.x, desired.z) + MIN_GROUND_CLEARANCE);
@@ -58,7 +64,9 @@ export class ChaseCamera {
     this.camera.position.copy(this.position);
     this.camera.lookAt(targetPosition.x, targetPosition.y + cameraTuning.lookHeight, targetPosition.z);
 
-    const fov = cameraTuning.baseFov + cameraTuning.speedFov * THREE.MathUtils.clamp(speed / cameraTuning.fovTopSpeed, 0, 1);
+    const fov = cameraTuning.baseFov
+      + cameraTuning.speedFov * THREE.MathUtils.clamp(speed / cameraTuning.fovTopSpeed, 0, 1)
+      + cameraTuning.boostFov * this.boostBlend;
     if (Math.abs(fov - this.camera.fov) > 0.01) {
       this.camera.fov = fov;
       this.camera.updateProjectionMatrix();
@@ -70,6 +78,7 @@ export class ChaseCamera {
     this.placed = false;
     this.orbitYaw = 0;
     this.orbitPitch = 0;
+    this.boostBlend = 0;
   }
 
   followHeading(targetQuaternion, dt) {

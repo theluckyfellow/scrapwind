@@ -14,6 +14,13 @@ export const flightTuning = {
   landingSpeed: 2,        // m/s, the fastest it will descend right at the ground
   landingCushion: 0.8,    // 1/s; each metre of height allows this much more descent speed
   groundIdle: 0.06,       // fraction of max thrust while parked on the ground
+  // Acro mode: rate control with a manual collective. No levelling, no height hold — flips and dives
+  // are the pilot's own business.
+  acroPitchRate: 3.0,     // rad/s at full stick
+  acroRollRate: 3.4,      // rad/s at full stick
+  acroYawRate: 2.6,       // rad/s at full bumper
+  acroRateResponse: 6,    // 1/s, how hard the rates are chased
+  acroThrustAuthority: 1.6, // collective = hover thrust × (1 + this × climb input)
 };
 
 const GRAVITY = 9.81;
@@ -27,6 +34,7 @@ const YAW_AUTHORITY = 0.35;
 const MAX_DIVE_ACCELERATION = 0.5 * GRAVITY;
 const RIDE_HEIGHT = 0.9; // m from the centre of mass down to the ground when parked
 const MIN_LEVER_SPREAD = 0.05; // m² of summed lever arm below which an axis can't be controlled
+const ACRO_INPUT_SLEW = 10; // 1/s the acro rate targets chase the sticks; fast, but keyboard-friendly
 
 /**
  * FlightController: the vehicle's drone brain. Turns the pilot's tilt, climb and turn requests into a thrust
@@ -37,9 +45,11 @@ const MIN_LEVER_SPREAD = 0.05; // m² of summed lever arm below which an axis ca
 export class FlightController {
   engaged = false;
   holdAltitude = 0;  // m, the height to hold while the climb triggers are released
+  mode = 'assist';   // 'assist' self-levels and holds height; 'acro' is rate control for trick flying
+  acroRates = new THREE.Vector3(); // the slewed rate targets, so binary keys don't slam full rate
 
   /** Commands every rotor for this step. Inputs come from Controls; the track gives height above ground for landings. */
-  fly(chassis, rotors, controls, grounded, track) {
+  fly(chassis, rotors, controls, grounded, track, dt = 1 / 60) {
     const altitude = chassis.worldCenterOfMass().y;
     const climbInput = controls.value('climb') - controls.value('descend');
     if (!this.engaged) {
@@ -53,6 +63,10 @@ export class FlightController {
       return;
     }
 
+    if (this.mode === 'acro') {
+      this.mix(chassis, rotors, this.collectiveThrustAcro(chassis, climbInput), this.attitudeTorqueAcro(chassis, controls, dt));
+      return;
+    }
     const localTorque = this.attitudeTorque(chassis, controls);
     const collective = this.collectiveThrust(chassis, climbInput, altitude, track);
     this.mix(chassis, rotors, collective, localTorque);
@@ -61,11 +75,13 @@ export class FlightController {
   /** Called when the rotors are stowed, so the next take-off holds the height it starts at. */
   disengage() {
     this.engaged = false;
+    this.acroRates.set(0, 0, 0);
   }
 
   reset() {
     this.engaged = false;
     this.holdAltitude = 0;
+    this.acroRates.set(0, 0, 0);
   }
 
   /** The chassis-local torque that levels the buggy to the requested tilt and turn rate. */
@@ -96,6 +112,29 @@ export class FlightController {
 
     const inertia = chassis.principalInertia();
     return angularAcceleration.applyQuaternion(chassis.inverseRotation()).multiply(inertia);
+  }
+
+  /**
+   * Acro attitude: the sticks ask for rotation rates about the chassis's own axes, not angles.
+   * Centred sticks ask for zero rate, so the vehicle holds whatever attitude it has — that is the
+   * whole trick: flips and sideways flight are just attitudes the assist mode would never allow.
+   * The rate targets slew in fast, so keyboard's on/off keys read as a firm flick, not a snap.
+   */
+  attitudeTorqueAcro(chassis, controls, dt) {
+    const localRates = chassis.angularVelocity().applyQuaternion(chassis.inverseRotation());
+    const target = new THREE.Vector3(
+      -controls.value('tiltForward') * flightTuning.acroPitchRate,  // nose down is forward flight
+      -controls.value('yaw') * flightTuning.acroYawRate,            // positive yaw turns right
+      -controls.value('tiltRight') * flightTuning.acroRollRate,     // right roll drops the right side
+    );
+    this.acroRates.lerp(target, 1 - Math.exp(-ACRO_INPUT_SLEW * dt));
+    const correction = this.acroRates.clone().sub(localRates).multiplyScalar(flightTuning.acroRateResponse);
+    return correction.multiply(chassis.principalInertia());
+  }
+
+  /** Acro collective: a manual throttle around the hover point. Full descend cuts the rotors to nothing. */
+  collectiveThrustAcro(chassis, climbInput) {
+    return chassis.mass() * GRAVITY * Math.max(1 + climbInput * flightTuning.acroThrustAuthority, 0);
   }
 
   /** Total thrust along the chassis up axis that chases the requested climb rate or holds height. */

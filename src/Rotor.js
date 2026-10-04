@@ -10,6 +10,8 @@ export const rotorTuning = {
   spinUpRate: 7,            // 1/s, how quickly thrust follows its command (motor lag)
   dragAreaPerRotor: 0.6,    // m² of extra drag per deployed rotor; caps flying speed
   powerScale: 0.5,          // multiplies the ideal-rotor power draw; lower means longer flights
+  flightDrain: 2.5,         // the batteries waste this multiple of rotor power as heat: flying costs
+                            // this much more than the ideal draw, so the air is a luxury, not a shortcut
 };
 
 const AIR_DENSITY = 1.2;

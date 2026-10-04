@@ -1,7 +1,8 @@
 export const batteryTuning = {
   drainScale: 1,          // multiplies every watt-hour used; turn down for longer test sessions
-  regenEfficiency: 0.3,   // fraction of braking energy put back into the batteries
 };
+
+const DEFAULT_REGEN = 0.35; // fraction of braking energy put back; a design's regen dial overrides this
 
 const SECONDS_PER_HOUR = 3600;
 
@@ -15,7 +16,9 @@ export class BatteryPack {
   batteries;
   budget = 0;      // watts available this step
   used = 0;        // watts granted so far this step
+  auxiliaryWatts = 0; // unrequested losses counted on top of what was granted (rotor heat, mostly)
   lastPower = 0;   // watts used in the last finished step
+  regenFraction = DEFAULT_REGEN; // share of braking power taken back; set from the design's regen dial
 
   constructor(batteries) {
     this.batteries = batteries;
@@ -31,6 +34,7 @@ export class BatteryPack {
   beginStep() {
     this.budget = this.charge() > 0 ? this.maxPower() : 0;
     this.used = 0;
+    this.auxiliaryWatts = 0;
   }
 
   /** Asks for some watts; returns the fraction granted (1 = all of it). */
@@ -43,13 +47,19 @@ export class BatteryPack {
 
   /** Puts back some of the watts that braking is turning into heat. */
   recover(watts, dt) {
-    this.spread(-(watts * batteryTuning.regenEfficiency * dt) / SECONDS_PER_HOUR);
+    this.spread(-(watts * this.regenFraction * dt) / SECONDS_PER_HOUR);
   }
 
-  /** Ends the step: drains the batteries for the power used. */
+  /** Tops the pack up from outside (a surge pad on the track), in watt-hours. */
+  topUp(wattHours) {
+    this.spread(-wattHours);
+  }
+
+  /** Ends the step: drains the batteries for the power used, plus the auxiliary losses. */
   finishStep(dt) {
-    this.spread((this.used * batteryTuning.drainScale * dt) / SECONDS_PER_HOUR);
-    this.lastPower = this.used;
+    const total = this.used + this.auxiliaryWatts;
+    this.spread((total * batteryTuning.drainScale * dt) / SECONDS_PER_HOUR);
+    this.lastPower = total;
   }
 
   spread(wattHours) {

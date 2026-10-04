@@ -53,7 +53,7 @@ export class Battery extends Part {
     this.visual.add(toonMesh(new THREE.BoxGeometry(width, height, depth), CASING_COLOR, { outline: 0.015 }));
     this.strip = new THREE.Mesh(
       new THREE.BoxGeometry(width * 0.7, STRIP_HEIGHT, depth * 0.12),
-      toonMaterial(FULL_COLOR, { emissive: FULL_COLOR, emissiveIntensity: 0.8 }),
+      toonMaterial(FULL_COLOR, { emissive: FULL_COLOR, emissiveIntensity: 1.2 }),
     );
     this.strip.position.y = height / 2 + STRIP_HEIGHT / 2;
     this.visual.add(this.strip);

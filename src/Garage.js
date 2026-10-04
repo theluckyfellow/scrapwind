@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { Vehicle } from './Vehicle.js';
-import { WHEELS, BATTERIES, ROTORS, TUBE_RADIUS, wheelHubPosition, rotorHubPosition } from './catalog.js';
+import { WHEELS, BATTERIES, BOOSTERS, ROTORS, BALLASTS, GYROS, TUBE_RADIUS, wheelHubPosition, rotorHubPosition } from './catalog.js';
 import { toonMesh, toonMaterial } from './toon.js';
 
 const GRID = 0.05;              // m; mount points snap to this along tubes and across the floor
@@ -16,16 +16,29 @@ const GHOST_OPACITY = 0.5;
 const BACKGROUND_COLOR = 0x2b3138;
 const STAGE = new THREE.Vector3(0, TURNTABLE_TOP, 0);
 
-const MODELS = { wheel: WHEELS, battery: BATTERIES, rotor: ROTORS };
+const MODELS = { wheel: WHEELS, battery: BATTERIES, surge: BOOSTERS, rotor: ROTORS, ballast: BALLASTS, gyro: GYROS };
+
+/** A solid box part sits its own half-size off the surface along the mount normal. */
+const boxOffset = (mount, model) => {
+  const half = model.size.map(size => size / 2);
+  return mount.position.map((value, axis) => value + mount.normal[axis] * half[axis]);
+};
 
 // How each kind of part sits relative to the mount point picked on the frame.
 const PART_OFFSETS = {
   wheel: mount => mount.position,
   rotor: mount => mount.position,
-  battery: (mount, model) => {
-    const half = model.size.map(size => size / 2);
-    return mount.position.map((value, axis) => value + mount.normal[axis] * half[axis]);
-  },
+  battery: boxOffset,
+  surge: boxOffset,
+  ballast: boxOffset,
+  gyro: boxOffset,
+};
+
+/** A plain box the part's own size, for ghosts of the solid box parts. */
+const ghostBox = (model, position, rideHeight, material) => {
+  const box = new THREE.Mesh(new THREE.BoxGeometry(...model.size), material);
+  box.position.set(...position);
+  return [box];
 };
 
 // Ghost shapes for each kind of part, drawn where it would go.
@@ -36,10 +49,19 @@ const GHOST_SHAPES = {
     tyre.position.set(...hub);
     return [tyre, strut(position, hub, material)];
   },
-  battery: (model, position, rideHeight, material) => {
-    const box = new THREE.Mesh(new THREE.BoxGeometry(...model.size), material);
-    box.position.set(...position);
-    return [box];
+  battery: ghostBox,
+  ballast: ghostBox,
+  surge: (model, position, rideHeight, material) => {
+    const radius = Math.min(model.size[0], model.size[2]) / 2;
+    const can = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, model.size[1], 12), material);
+    can.position.set(...position);
+    return [can];
+  },
+  gyro: (model, position, rideHeight, material) => {
+    const radius = Math.min(model.size[0], model.size[2]) / 2;
+    const ball = new THREE.Mesh(new THREE.SphereGeometry(radius, 12, 8), material);
+    ball.position.set(...position);
+    return [ball];
   },
   rotor: (model, position, rideHeight, material) => {
     const hub = rotorHubPosition(model, position);
@@ -174,10 +196,6 @@ export class Garage {
 
   update() {
     if (this.active) this.orbit.update();
-  }
-
-  render(renderer) {
-    renderer.render(this.scene, this.camera);
   }
 
   resize(width, height) {

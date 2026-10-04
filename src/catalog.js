@@ -60,23 +60,32 @@ export const BODIES = {
 };
 
 // Every wheel unit comes with its suspension, hub motor and axle. Motor torque is at the wheel (N·m),
-// power in watts; looseGrip multiplies grip on sand and mud.
+// power in watts; grip is the peak friction coefficient at the wheel's resting load (load sensitivity
+// means a lightly loaded tyre holds a little more of it); looseGrip multiplies grip on sand and mud.
 export const WHEELS = {
   city: {
     name: 'City wheel', blurb: 'Small and light. Fine on rock and road, weak off them.',
-    radius: 0.3, width: 0.17, mass: 16, grip: 1.0, looseGrip: 0.75, motorTorque: 170, motorPower: 12000, maxSpeed: 30,
+    radius: 0.3, width: 0.17, mass: 16, grip: 1.05, looseGrip: 0.75, motorTorque: 170, motorPower: 12000, maxSpeed: 30,
   },
   slick: {
     name: 'Road slick', blurb: 'Huge grip on rock, hopeless in mud.',
-    radius: 0.35, width: 0.28, mass: 22, grip: 1.3, looseGrip: 0.6, motorTorque: 340, motorPower: 38000, maxSpeed: 52,
+    radius: 0.35, width: 0.28, mass: 22, grip: 1.45, looseGrip: 0.6, motorTorque: 340, motorPower: 38000, maxSpeed: 52,
   },
   allTerrain: {
     name: 'All-terrain', blurb: 'The sensible choice.',
-    radius: 0.42, width: 0.3, mass: 30, grip: 1.12, looseGrip: 0.95, motorTorque: 480, motorPower: 32000, maxSpeed: 42,
+    radius: 0.42, width: 0.3, mass: 30, grip: 1.28, looseGrip: 0.95, motorTorque: 480, motorPower: 32000, maxSpeed: 42,
   },
   knobby: {
     name: 'Big knobby', blurb: 'Climbs anything. Heavy, and slow to change direction.',
-    radius: 0.56, width: 0.4, mass: 46, grip: 1.05, looseGrip: 1.15, motorTorque: 780, motorPower: 42000, maxSpeed: 36,
+    radius: 0.56, width: 0.4, mass: 46, grip: 1.32, looseGrip: 1.15, motorTorque: 780, motorPower: 42000, maxSpeed: 36,
+  },
+  duner: {
+    name: 'Dune floater', blurb: 'Wide paddle tyre. Rides up on sand, holds a line on hard ground.',
+    radius: 0.48, width: 0.36, mass: 34, grip: 1.2, looseGrip: 1.4, motorTorque: 560, motorPower: 40000, maxSpeed: 44,
+  },
+  velocity: {
+    name: 'Velocity ring', blurb: 'Faired racing wheel around a monster motor. Built for the salt; helpless off it.',
+    radius: 0.44, width: 0.3, mass: 40, grip: 1.42, looseGrip: 0.55, motorTorque: 720, motorPower: 68000, maxSpeed: 75,
   },
 };
 
@@ -89,6 +98,27 @@ export const BATTERIES = {
   slab: {
     name: 'Slab pack', blurb: 'Big flat pack: lots of power and range, lots of weight.',
     size: [0.9, 0.16, 0.7], mass: 130, capacity: 6000, maxPower: 70000,
+  },
+  stack: {
+    name: 'Power stack', blurb: 'Drag-strip cells: huge watts, small tank.',
+    size: [0.6, 0.22, 0.5], mass: 64, capacity: 2500, maxPower: 120000,
+  },
+  longhaul: {
+    name: 'Long haul pack', blurb: 'Cross-desert capacity at a gentle pace.',
+    size: [1.0, 0.18, 0.85], mass: 200, capacity: 12000, maxPower: 45000,
+  },
+};
+
+// Surge capacitors: hold a burst of power the motors can draw on top of what the batteries give.
+// surgeWatts is the burst power, surgeJoules the energy it holds, rechargeWatts how fast it refills.
+export const BOOSTERS = {
+  can: {
+    name: 'Surge capacitor', blurb: 'Hold boost for a kick of extra motor power.',
+    size: [0.36, 0.22, 0.36], mass: 14, surgeWatts: 90000, surgeJoules: 150000, rechargeWatts: 12000,
+  },
+  bank: {
+    name: 'Surge bank', blurb: 'A long, hard boost. Heavy, and hungry to refill.',
+    size: [0.6, 0.28, 0.6], mass: 36, surgeWatts: 220000, surgeJoules: 450000, rechargeWatts: 18000,
   },
 };
 
@@ -103,6 +133,22 @@ export const ROTORS = {
   },
 };
 
+// Dead weight, for moving the centre of mass exactly where you want it.
+export const BALLASTS = {
+  block: {
+    name: 'Lead block', blurb: '60 kg of dead weight. Balance a build, plant the nose, or bring stunt ballast.',
+    size: [0.5, 0.14, 0.4], mass: 60,
+  },
+};
+
+// Spinning-mass stabilizers: each one strengthens the upright assist that fights a roll at speed.
+export const GYROS = {
+  stabilizer: {
+    name: 'Gyro stabilizer', blurb: 'A spinning mass that fights the roll. Bolt on more for bigger airs.',
+    size: [0.42, 0.3, 0.42], mass: 26,
+  },
+};
+
 // Body panels sit in fixed slots. drag adds to the drag coefficient (covering the frame lowers it);
 // downforce is lift area in m² (C × A), pushing down at the slot as speed squared.
 export const PANEL_SLOTS = {
@@ -112,7 +158,7 @@ export const PANEL_SLOTS = {
       none: { name: 'Open frame', mass: 0, drag: 0, downforce: 0 },
       panel: { name: 'Panel', mass: 8, drag: -0.12, downforce: 0 },
       grille: { name: 'Grille', mass: 10, drag: -0.08, downforce: 0 },
-      splitter: { name: 'Splitter', mass: 12, drag: -0.1, downforce: 0.25 },
+      splitter: { name: 'Splitter', mass: 12, drag: -0.1, downforce: 0.5 },
     },
   },
   hood: {
@@ -135,7 +181,7 @@ export const PANEL_SLOTS = {
     name: 'Sides',
     styles: {
       none: { name: 'Open frame', mass: 0, drag: 0, downforce: 0 },
-      skirts: { name: 'Skirts', mass: 8, drag: -0.04, downforce: 0.15 },
+      skirts: { name: 'Skirts', mass: 8, drag: -0.04, downforce: 0.3 },
       panels: { name: 'Panels', mass: 16, drag: -0.1, downforce: 0 },
       doors: { name: 'Doors and windows', mass: 20, drag: -0.11, downforce: 0 },
     },
@@ -145,15 +191,15 @@ export const PANEL_SLOTS = {
     styles: {
       none: { name: 'Open frame', mass: 0, drag: 0, downforce: 0 },
       panel: { name: 'Panel', mass: 6, drag: -0.06, downforce: 0 },
-      ducktail: { name: 'Ducktail', mass: 8, drag: -0.05, downforce: 0.2 },
+      ducktail: { name: 'Ducktail', mass: 8, drag: -0.05, downforce: 0.45 },
     },
   },
   wing: {
     name: 'Wing',
     styles: {
       none: { name: 'None', mass: 0, drag: 0, downforce: 0 },
-      low: { name: 'Low wing', mass: 9, drag: 0.03, downforce: 0.45 },
-      high: { name: 'High wing', mass: 11, drag: 0.06, downforce: 0.8 },
+      low: { name: 'Low wing', mass: 9, drag: 0.03, downforce: 0.9 },
+      high: { name: 'High wing', mass: 11, drag: 0.06, downforce: 1.6 },
     },
   },
 };

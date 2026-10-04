@@ -13,11 +13,19 @@ main();
 
 async function main() {
   await RAPIER.init();
-  const game = new Game(
-    document.getElementById('game'),
-    document.getElementById('hud'),
-    PHYSICS_STEP_SECONDS,
-  );
+  let game;
+  try {
+    game = new Game(
+      document.getElementById('game'),
+      document.getElementById('hud'),
+      PHYSICS_STEP_SECONDS,
+    );
+  } catch (error) {
+    // Never leave the player staring at an eternal loading screen with no clue why.
+    console.error(error);
+    document.getElementById('loading').textContent = `Scrapwind failed to start: ${error.message}. Reload, or open the browser console for the full error.`;
+    return;
+  }
   document.getElementById('loading').remove();
   // In development, the game is reachable from the browser console for poking at.
   if (import.meta.env.DEV) window.scrapwind = game;

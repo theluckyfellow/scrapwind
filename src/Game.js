@@ -12,6 +12,10 @@ import { rotorTuning } from './Rotor.js';
 import { flightTuning } from './FlightController.js';
 import { TestTrack } from './TestTrack.js';
 import { Sky } from './Sky.js';
+import { PostFX } from './PostFX.js';
+import { Dust } from './Dust.js';
+import { Haze } from './Haze.js';
+import { Sound } from './Sound.js';
 import { Garage } from './Garage.js';
 import { GarageMenu } from './GarageMenu.js';
 import { ChaseCamera, cameraTuning } from './ChaseCamera.js';
@@ -23,9 +27,10 @@ const SPAWN_GROUND = new THREE.Vector3(0, 0.03, 30); // on the start pad
 const SPAWN_HEADING = 0;          // radians; 0 faces north (−Z), toward the ramps
 const FALL_LIMIT = -60;           // m; below this the vehicle is lost and respawns
 const CAMERA_NEAR = 0.1;
-const CAMERA_FAR = 5000;
+const CAMERA_FAR = 6500;
 const MAX_PIXEL_RATIO = 2;
 const LAST_DESIGN_KEY = 'scrapwind-last-design';
+const ZERO = new THREE.Vector3();
 
 // One-shot buttons while driving, and what they do.
 const DRIVING_ACTIONS = {
@@ -51,6 +56,8 @@ export class Game {
   world;
   track;
   sky;
+  postfx;
+  dust;
   garage;
   garageMenu;
   vehicle = null;
@@ -72,6 +79,10 @@ export class Game {
     this.world.timestep = physicsStepSeconds;
     this.sky = new Sky(this.scene);
     this.track = new TestTrack(this.world, this.scene);
+    this.postfx = new PostFX(this.renderer, this.scene, this.camera);
+    this.dust = new Dust(this.scene);
+    this.haze = new Haze(this.scene);
+    this.sound = new Sound();
 
     this.controls = new Controls(window);
     this.chaseCamera = new ChaseCamera(this.camera, this.track);
@@ -85,7 +96,7 @@ export class Game {
       { title: 'Chassis', record: chassisTuning, onChange: () => this.vehicle?.applyMassTuning() },
       { title: 'Suspension and tyres', record: wheelTuning, onChange: () => this.vehicle?.refitSuspension() },
       { title: 'Steering', record: handlingTuning },
-      { title: 'Brakes', record: drivetrainTuning },
+      { title: 'Drive and boost', record: drivetrainTuning },
       { title: 'Batteries', record: batteryTuning },
       { title: 'Rotors', record: rotorTuning },
       { title: 'Flight', record: flightTuning },
@@ -109,9 +120,17 @@ export class Game {
   /** One fixed physics step on the proving ground (the garage doesn't simulate). */
   step(dt) {
     if (this.mode !== 'drive') return;
+    this.track.stepPods(dt); // kinematic pods claim their next pose before the world steps
     this.vehicle.step(this.controls, this.track, dt);
     this.world.step();
     this.vehicle.afterPhysicsStep();
+    const onPad = Boolean(this.track.boostPadAt(this.vehicle.drawnPosition()));
+    if (onPad && !this.wasOnPad) this.sound.pad();
+    this.wasOnPad = onPad;
+    if (onPad) {
+      this.vehicle.chargeFromPad(dt);
+      this.telemetry.flashPad();
+    }
     if (this.vehicle.altitude() < FALL_LIMIT) this.respawn();
   }
 
@@ -120,11 +139,14 @@ export class Game {
     this.elapsedSeconds += frameSeconds;
     if (this.mode === 'garage') {
       this.garage.update();
-      this.garage.render(this.renderer);
+      this.postfx.target(this.garage.scene, this.garage.camera);
+      this.postfx.clearSun();
+      this.postfx.render();
       return;
     }
     this.vehicle.updateVisual(alpha, frameSeconds);
     this.track.updateVisuals(this.elapsedSeconds);
+    this.emitDust(frameSeconds);
 
     const position = this.vehicle.drawnPosition();
     this.chaseCamera.update(
@@ -134,10 +156,35 @@ export class Game {
       this.controls.value('lookRight'),
       this.controls.value('lookUp'),
       frameSeconds,
+      this.vehicle.boosting() ? 1 : 0,
     );
     this.sky.follow(this.camera.position, position);
+    this.sky.updateTime(this.elapsedSeconds);
+    this.haze.update(position, frameSeconds, (x, z) => this.track.heightAt(x, z));
+    this.sound.update(this.vehicle, frameSeconds);
     this.telemetry.update(this.vehicle, this.controls, frameSeconds);
-    this.renderer.render(this.scene, this.camera);
+    this.postfx.target(this.scene, this.camera);
+    this.postfx.updateSun(this.camera);
+    this.postfx.render();
+  }
+
+  /** Feeds the dust: tyre billows, the rotor downwash ring when flying low, capacitor sparks on boost. */
+  emitDust(frameSeconds) {
+    for (const source of this.vehicle.dustSources()) this.dust.emit(source, frameSeconds);
+    if (this.vehicle.flying()) {
+      const position = this.vehicle.drawnPosition();
+      const altitude = position.y - this.track.heightAt(position.x, position.z);
+      if (altitude < 5) {
+        this.dust.emit({
+          point: new THREE.Vector3(position.x, this.track.heightAt(position.x, position.z), position.z),
+          color: 0xd8b98a,
+          intensity: THREE.MathUtils.clamp(1 - altitude / 5, 0, 1) * 0.8,
+          spark: false,
+          velocity: ZERO,
+        }, frameSeconds);
+      }
+    }
+    this.dust.update(frameSeconds);
   }
 
   /** Builds the design as a real vehicle on the start pad and hands over the controls. */
@@ -174,6 +221,7 @@ export class Game {
     const width = window.innerWidth;
     const height = window.innerHeight;
     this.renderer.setSize(width, height);
+    this.postfx.setSize(width, height);
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.garage.resize(width, height);

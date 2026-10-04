@@ -3,18 +3,25 @@ import { Chassis } from './Chassis.js';
 import { Wheel } from './Wheel.js';
 import { Battery } from './Battery.js';
 import { Rotor } from './Rotor.js';
+import { Capacitor } from './Capacitor.js';
+import { Ballast } from './Ballast.js';
+import { Gyro } from './Gyro.js';
 import { BatteryPack } from './BatteryPack.js';
 import { Drivetrain } from './Drivetrain.js';
 import { FlightController } from './FlightController.js';
+import { rotorTuning } from './Rotor.js';
 import { RIDE_HEIGHT_RANGE } from './catalog.js';
 import { disposeTree } from './toon.js';
 
 export const handlingTuning = {
-  maxSteerDegrees: 32,
-  highSpeedSteerDegrees: 9,    // steering narrows to this at speed, so the stick stays usable
-  steerFalloffSpeed: 32,       // m/s where steering has narrowed fully
-  steerSpeed: 3.2,             // rad/s the steering wheels can turn
+  maxSteerDegrees: 38,        // full lock at a crawl
+  steerSpeed: 4.5,             // rad/s the steering wheels can turn
+  steerGripMargin: 1.1,        // steering may ask the tyres for this multiple of their cornering grip
   antiRollStiffness: 5000,     // N/m per left–right pair of wheels, resisting body roll
+  yawAssistTorque: 90,         // N·m of turn-in per rad of steer and m/s of ground speed
+  yawAssistMaxSpeed: 16,       // m/s; the turn-in assist fades out between half and this speed
+  uprightAssist: 0.35,         // righting torque, as a fraction of weight × sin(roll), with no gyros fitted
+  uprightAssistPerGyro: 0.45,  // extra righting per gyro stabilizer bolted on
 };
 
 const STEER_MARGIN = 0.3;      // m a wheel must sit ahead of the centre of mass to steer
@@ -24,6 +31,13 @@ const INPUT_THRESHOLD = 0.1;
 const SPAWN_CLEARANCE = 0.3;   // m the vehicle drops onto the ground at spawn
 const FLIP_MAX_SPEED = 6;      // m/s; flipping upright only works when nearly stopped
 const FLIP_LIFT = 1.6;         // m
+const UPRIGHT_MIN_SPEED = 5;   // m/s; below this the upright assist leaves the body alone
+const UPRIGHT_ROLL_SINE = 0.3; // sin of the roll angle where the assist wakes up (~17°)
+const MAX_GYROS = 3;           // more gyro stabilizers than this add nothing
+const PAD_SURGE_WATTS = 120000; // a surge pad refills each capacitor at this rate
+const PAD_BATTERY_WATTS = 30000; // and trickles the batteries too
+const GRAVITY = 9.81;
+const AIR_DENSITY = 1.2;       // kg/m³
 const LOCAL_UP = new THREE.Vector3(0, 1, 0);
 
 // How to make each kind of part from a Blueprint placement.
@@ -36,6 +50,9 @@ const PART_MAKERS = {
     const spin = Math.sign(x * z) || (index % 2 === 0 ? 1 : -1);
     return new Rotor(name, placement.model, vector(placement.position), spin, placement.mountId);
   },
+  surge: (placement, name) => new Capacitor(name, placement.model, vector(placement.position), placement.mountId),
+  ballast: (placement, name) => new Ballast(name, placement.model, vector(placement.position), placement.mountId),
+  gyro: (placement, name) => new Gyro(name, placement.model, vector(placement.position), placement.mountId),
 };
 
 /**
@@ -52,9 +69,13 @@ export class Vehicle {
   flightController = new FlightController();
   batteryPack;
   antiRollPairs = [];
+  antiRollScale = 1;          // the design's anti-roll dial, multiplied into the bars' stiffness
+  simpleDrive = false;        // assisted driving: smoother, stabler, no wheelspin (the design's drive mode)
   steeringLineZ = 0;          // chassis-local z of the line the steering wheels turn about (the back axle)
   rotorsDeployed = false;
+  boostActive = false;        // boost held, capacitors in the build, and charge or power to back it
   steerAngle = 0;
+  tyreGripAverage = 1;        // mean model grip, the fallback estimate for grip-scaled steering
   currentRideHeight;
   spawnPosition;
   spawnQuaternion;
@@ -77,15 +98,23 @@ export class Vehicle {
 
     const loads = blueprint.wheelLoads();
     this.wheels().forEach((wheel, index) => wheel.fitSuspension(loads[index], this.currentRideHeight));
-    for (const battery of this.batteries()) this.chassis.attachBox(world, battery.size(), battery.mountPoint);
+    for (const part of this.parts) {
+      if (typeof part.size === 'function') this.chassis.attachBox(world, part.size(), part.mountPoint);
+    }
     this.batteryPack = new BatteryPack(this.batteries());
     this.assignSteering(centerOfMass);
+    this.assignAlignment();
+    this.applyTuning();
     this.antiRollPairs = pairWheels(this.wheels());
+    const wheelModels = this.wheels().map(wheel => wheel.model.grip);
+    if (wheelModels.length) this.tyreGripAverage = wheelModels.reduce((sum, grip) => sum + grip, 0) / wheelModels.length;
   }
 
   wheels() { return this.parts.filter(part => part instanceof Wheel); }
   batteries() { return this.parts.filter(part => part instanceof Battery); }
   rotors() { return this.parts.filter(part => part instanceof Rotor); }
+  capacitors() { return this.parts.filter(part => part instanceof Capacitor); }
+  gyros() { return this.parts.filter(part => part instanceof Gyro); }
 
   /** The root of everything drawn for this vehicle. */
   visual() { return this.chassis.visual; }
@@ -102,27 +131,53 @@ export class Vehicle {
     for (const wheel of wheels) wheel.sense(this.chassis, track, dt);
     this.applyAntiRoll();
     const grounded = wheels.some(wheel => wheel.touchingGround());
+    if (grounded && !this.rotorsDeployed) {
+      this.applyYawAssist(dt);
+      this.applyUprightAssist();
+    }
 
     // With the rotors out, the triggers fly instead of drive.
     const throttle = this.rotorsDeployed ? 0 : controls.value('throttle');
-    this.drivetrain.update(throttle, controls.value('brake'), this.chassis.forwardSpeed());
+    const boost = this.rotorsDeployed ? 0 : controls.value('boost');
+    this.drivetrain.update(throttle, controls.value('brake'), this.chassis.forwardSpeed(), boost, dt);
     this.batteryPack.beginStep();
+    const capacitors = this.capacitors();
+    for (const capacitor of capacitors) capacitor.beginStep();
 
     // Rotors get first call on the power: staying in the air matters more than the wheels.
     for (const rotor of rotors) rotor.deployTowards(this.rotorsDeployed, dt);
     if (rotors.length > 0 && rotors.every(rotor => rotor.deployed())) {
-      this.flightController.fly(this.chassis, rotors, controls, grounded, track);
+      this.flightController.fly(this.chassis, rotors, controls, grounded, track, dt);
     } else {
       this.flightController.disengage();
       for (const rotor of rotors) rotor.command(0);
     }
     const rotorShare = this.batteryPack.request(rotors.reduce((sum, rotor) => sum + rotor.powerDemand(), 0));
+    // Flying wastes most of its watts as heat: the drain is a multiple of what the rotors were granted,
+    // so hover time is short and acro climbs are ruinous, while thrust and hover ability are untouched.
+    this.batteryPack.auxiliaryWatts = rotors.reduce((sum, rotor) => sum + rotor.powerDemand(), 0)
+      * rotorShare * (rotorTuning.flightDrain - 1);
     for (const rotor of rotors) rotor.limitPower(rotorShare);
 
-    // Then the hub motors share what is left.
+    // Then the hub motors share what is left, topped up by the surge capacitors while boost is held.
     const requests = wheels.map(wheel => this.drivetrain.motorRequest(wheel));
     const wheelDemand = wheels.reduce((sum, wheel, index) => sum + wheel.motorPower(requests[index]), 0);
-    const wheelShare = this.batteryPack.request(wheelDemand);
+    let wheelShare = this.batteryPack.request(wheelDemand);
+    this.boostActive = false;
+    if (boost > 0.5 && wheelDemand > 0 && capacitors.length > 0) {
+      const surgeWatts = capacitors.reduce((sum, capacitor) => sum + capacitor.availableSurge(), 0);
+      const granted = Math.min(wheelDemand * (1 - wheelShare), surgeWatts);
+      if (granted > 0) {
+        for (const capacitor of capacitors) capacitor.deliver(capacitor.availableSurge() * (granted / surgeWatts), dt);
+        wheelShare = Math.min(1, wheelShare + granted / wheelDemand);
+      }
+      this.boostActive = capacitors.some(capacitor => capacitor.charge > 0);
+    } else if (capacitors.length > 0 && this.batteryPack.charge() > 0) {
+      // Off boost, the capacitors trickle themselves full from whatever the batteries can spare.
+      const rechargeDemand = capacitors.reduce((sum, capacitor) => sum + capacitor.rechargeDemand(), 0);
+      const rechargeShare = this.batteryPack.request(rechargeDemand);
+      if (rechargeShare > 0) for (const capacitor of capacitors) capacitor.chargeWith(capacitor.rechargeDemand() * rechargeShare, dt);
+    }
     const handbrake = controls.value('handbrake') > 0.5;
     wheels.forEach((wheel, index) => {
       wheel.grip(this.chassis, track, requests[index] * wheelShare, this.drivetrain.brakeForce(wheel),
@@ -137,6 +192,7 @@ export class Vehicle {
     if (!grounded && !this.rotorsDeployed) {
       this.chassis.dampTumble();
       this.chassis.applyAirControl(controls.value('tiltForward'), controls.value('tiltRight'));
+      this.chassis.applyAirYaw(controls.value('steer'));
     }
   }
 
@@ -174,6 +230,7 @@ export class Vehicle {
     this.drivetrain.reset();
     this.flightController.reset();
     this.rotorsDeployed = false;
+    this.boostActive = false;
     this.steerAngle = 0;
   }
 
@@ -221,12 +278,42 @@ export class Vehicle {
   maxPower() { return this.batteryPack.maxPower(); }
   rideHeight() { return this.currentRideHeight; }
   flying() { return this.rotorsDeployed; }
+  boosting() { return this.boostActive; }
   hasRotors() { return this.rotors().length > 0; }
+  hasSurge() { return this.capacitors().length > 0; }
   mountSurfaces() { return this.chassis.mountSurfaces(); }
   partVisuals() { return this.parts.map(part => part.visual); }
   showPanels(visible) { this.chassis.bodywork.showPanels(visible); }
   wheelReadouts() { return this.wheels().map(wheel => wheel.readout()); }
   appliedForces() { return this.parts.flatMap(part => part.forces()); }
+
+  /**
+   * Where dust and sparks should billow: each tyre on loose ground or sliding, plus the capacitors
+   * crackling while boost is live. One source per wheel: { point, color, intensity, spark, velocity }.
+   */
+  dustSources() {
+    const sources = [];
+    const speed = this.chassis.speed();
+    const velocity = this.chassis.linearVelocity();
+    for (const wheel of this.wheels()) {
+      const contact = wheel.contact();
+      if (!contact) continue;
+      const intensity = contact.surface.loose
+        ? THREE.MathUtils.clamp(speed / 14, 0, 1) + (contact.sliding ? 0.4 : 0)
+        : (contact.sliding ? 0.7 : (speed > 20 ? 0.25 : 0));
+      if (intensity < 0.05) continue;
+      sources.push({ point: contact.point, color: contact.surface.color, intensity, spark: false, velocity });
+    }
+    if (this.boostActive) {
+      for (const capacitor of this.capacitors()) {
+        sources.push({
+          point: this.chassis.toWorld(capacitor.mountPoint.clone()),
+          color: 0x7fe8ff, intensity: 0.8, spark: true, velocity,
+        });
+      }
+    }
+    return sources;
+  }
 
   /** The test vehicle's adjustable suspension: raise or lower while driving (input −1..1). */
   adjustRideHeight(input, wheels, dt) {
@@ -245,27 +332,109 @@ export class Vehicle {
     this.steeringLineZ = fixed.length ? fixed.reduce((sum, wheel) => sum + wheel.hubZ(), 0) / fixed.length : centerOfMass.z;
   }
 
-  /** Narrows steering with speed, eases the wheels toward the target and points each at one turning centre. */
+  /** Applies the design's toe and camber: the steering axle gets the front settings, the rest the rear. */
+  assignAlignment() {
+    for (const wheel of this.wheels()) {
+      const end = wheel.steers() ? 'front' : 'rear';
+      wheel.setAlignment(this.blueprint.alignment[`${end}Toe`], this.blueprint.alignment[`${end}Camber`]);
+    }
+  }
+
+  /** Wires the design's handling dials and control setups into the drivetrain, springs, bars and flight brain. */
+  applyTuning() {
+    const tuning = this.blueprint.tuning;
+    this.drivetrain.torqueSplit = tuning.torqueSplit;
+    this.drivetrain.brakeBias = tuning.brakeBias;
+    this.antiRollScale = tuning.antiRoll;
+    this.batteryPack.regenFraction = tuning.regen;
+    this.simpleDrive = this.blueprint.controls.drive === 'simple';
+    this.drivetrain.assists = this.simpleDrive;
+    this.flightController.mode = this.blueprint.controls.flight;
+    for (const wheel of this.wheels()) {
+      wheel.setSpringScale(tuning.springRate);
+      wheel.tractionAssist = this.simpleDrive;
+      wheel.fitSuspension(wheel.restingLoad, this.currentRideHeight);
+    }
+  }
+
+  /**
+   * A gentle righting hand once the body leans too far at speed: every build gets a little, and each
+   * gyro stabilizer makes it much stronger. Positive torque about the nose pushes a raised side down.
+   */
+  applyUprightAssist() {
+    const speed = this.chassis.speed();
+    if (speed < UPRIGHT_MIN_SPEED) return;
+    const roll = this.chassis.right().y;
+    const threshold = this.simpleDrive ? 0.15 : UPRIGHT_ROLL_SINE;
+    if (Math.abs(roll) < threshold) return;
+    const strength = handlingTuning.uprightAssist
+      + Math.min(this.gyros().length, MAX_GYROS) * handlingTuning.uprightAssistPerGyro;
+    const assist = strength * (this.simpleDrive ? 1.6 : 1);
+    const torque = this.chassis.forward().multiplyScalar(roll * this.chassis.mass() * GRAVITY * assist);
+    this.chassis.twist(torque);
+  }
+
+  /** A surge pad on the track pours charge into the capacitors, and a little into the batteries. */
+  chargeFromPad(dt) {
+    for (const capacitor of this.capacitors()) capacitor.chargeWith(PAD_SURGE_WATTS, dt);
+    this.batteryPack.topUp((PAD_BATTERY_WATTS * dt) / 3600);
+  }
+
+  /** Eases the wheels toward the target, capped by what the tyres can grip, and points each at one turning centre. */
   steer(input, wheels, dt) {
-    const narrowing = THREE.MathUtils.clamp(Math.abs(this.chassis.forwardSpeed()) / handlingTuning.steerFalloffSpeed, 0, 1);
-    const maxAngle = THREE.MathUtils.degToRad(
-      THREE.MathUtils.lerp(handlingTuning.maxSteerDegrees, handlingTuning.highSpeedSteerDegrees, narrowing),
+    const steering = wheels.filter(wheel => wheel.steers());
+    if (steering.length === 0) return;
+    const reach = Math.max(...steering.map(wheel => this.steeringLineZ - wheel.hubZ()), 0.1);
+    const speed = Math.max(Math.abs(this.chassis.forwardSpeed()), 0.1);
+    const maxAngle = Math.min(
+      THREE.MathUtils.degToRad(handlingTuning.maxSteerDegrees),
+      this.gripLimitedSteerAngle(speed, reach, wheels),
     );
     const maxChange = handlingTuning.steerSpeed * dt;
     this.steerAngle += THREE.MathUtils.clamp(input * maxAngle - this.steerAngle, -maxChange, maxChange);
 
-    const steering = wheels.filter(wheel => wheel.steers());
-    const reach = Math.max(...steering.map(wheel => this.steeringLineZ - wheel.hubZ()), 0.1);
     for (const wheel of steering) {
       wheel.setSteerAngle(ackermannAngle(this.steerAngle, reach, this.steeringLineZ - wheel.hubZ(), wheel.hubX()));
     }
+  }
+
+  /**
+   * The widest steer that still asks the tyres for no more than about their cornering grip, so the front
+   * never demands an impossible turn and plows (the old boat). Aero downforce counts: at speed, wings
+   * and splitters hold the car harder into the turn, so the steering stays generous — the F-Zero trick.
+   */
+  gripLimitedSteerAngle(speed, reach, wheels) {
+    const gripping = wheels.filter(wheel => wheel.touchingGround());
+    const grip = gripping.length
+      ? gripping.reduce((sum, wheel) => sum + wheel.gripEstimate(), 0) / gripping.length
+      : this.tyreGripAverage;
+    const aeroDownforce = 0.5 * AIR_DENSITY * speed * speed * this.chassis.downforceArea();
+    const aeroGrip = (aeroDownforce / this.chassis.mass()) * grip;
+    // Assisted driving never asks the tyres for more than they have; advanced leaves a margin to play with.
+    const margin = this.simpleDrive ? 0.95 : handlingTuning.steerGripMargin;
+    const lateralAccel = GRAVITY * grip * margin + aeroGrip;
+    return Math.atan2(lateralAccel * reach, speed * speed);
+  }
+
+  /** A little extra turn-in at low and middling speeds, where big builds feel laziest. */
+  applyYawAssist(dt) {
+    const speed = Math.abs(this.chassis.forwardSpeed());
+    if (speed < 1) return;
+    const fade = this.simpleDrive
+      ? 2 // assisted driving keeps the full turn-in help at every speed
+      : 1 - THREE.MathUtils.clamp((speed - handlingTuning.yawAssistMaxSpeed / 2) / (handlingTuning.yawAssistMaxSpeed / 2), 0, 1);
+    if (fade <= 0) return;
+    const torque = this.steerAngle * Math.min(speed, handlingTuning.yawAssistMaxSpeed)
+      * handlingTuning.yawAssistTorque * fade;
+    this.chassis.twist(this.chassis.up().multiplyScalar(-torque));
   }
 
   /** Each left–right pair's anti-roll bar moves load from the more compressed wheel to the other, resisting lean. */
   applyAntiRoll() {
     for (const [left, right] of this.antiRollPairs) {
       if (!left.touchingGround() || !right.touchingGround()) continue;
-      const transfer = (left.compressionAmount() - right.compressionAmount()) * handlingTuning.antiRollStiffness;
+      const transfer = (left.compressionAmount() - right.compressionAmount())
+        * handlingTuning.antiRollStiffness * this.antiRollScale;
       left.shareLoad(this.chassis, transfer);
       right.shareLoad(this.chassis, -transfer);
     }

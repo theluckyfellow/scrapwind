@@ -15,6 +15,7 @@ const OUTSET = 0.045;          // panels sit just outside the tubes they cover
 const FLOOR_TOP = 0.015;
 const JOINT_RADIUS = 0.05;
 const GLASS_OPACITY = 0.55;
+const GHOST_OPACITY = 0.16;    // panels ghost to this while parts are being placed
 const UP = new THREE.Vector3(0, 1, 0);
 
 // One builder per panel slot: given the body and the chosen style, returns the meshes for that slot.
@@ -101,6 +102,7 @@ export class Bodywork {
   group = new THREE.Group();
   panelGroup = new THREE.Group();
   mountSurfaces = [];   // meshes parts can be mounted on; userData says which tube or the floor
+  panelMaterials = [];  // this body's own paint/glass/trim materials, ghosted while placing parts
 
   constructor(blueprint) {
     const body = BODIES[blueprint.bodyKey];
@@ -111,9 +113,16 @@ export class Bodywork {
     this.group.add(this.panelGroup);
   }
 
-  /** Hides the panels so the frame can be seen while placing parts. */
+  /** Shows the panels, or ghosts them translucent so the frame can be seen and clicked while placing parts. */
   showPanels(visible) {
-    this.panelGroup.visible = visible;
+    for (const material of this.panelMaterials) {
+      material.opacity = visible ? material.userData.baseOpacity : GHOST_OPACITY;
+      material.transparent = !visible || material.userData.baseTransparent;
+      material.depthWrite = visible && material.userData.baseDepthWrite;
+    }
+    this.panelGroup.traverse(node => {
+      if (node.userData.ghostsWithPanels) node.visible = visible;
+    });
   }
 
   buildFrame(body) {
@@ -165,8 +174,18 @@ export class Bodywork {
       headlight: toonMaterial(HEADLIGHT_COLOR, { emissive: HEADLIGHT_COLOR, emissiveIntensity: 0.7 }),
       tailLight: toonMaterial(TAIL_LIGHT_COLOR, { emissive: TAIL_LIGHT_COLOR, emissiveIntensity: 0.6 }),
     };
+    for (const material of Object.values(materials)) {
+      material.userData.baseOpacity = material.opacity;
+      material.userData.baseTransparent = material.transparent;
+      material.userData.baseDepthWrite = material.depthWrite;
+      this.panelMaterials.push(material);
+    }
     for (const [slot, style] of Object.entries(panels)) {
-      for (const mesh of PANEL_BUILDERS[slot](body, style, materials)) this.panelGroup.add(mesh);
+      for (const mesh of PANEL_BUILDERS[slot](body, style, materials)) {
+        // Ink lines and outline shells stay solid when the panel ghosts; they hide with it instead.
+        for (const child of mesh.children) child.userData.ghostsWithPanels = true;
+        this.panelGroup.add(mesh);
+      }
     }
   }
 

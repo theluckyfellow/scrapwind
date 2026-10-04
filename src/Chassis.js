@@ -5,6 +5,7 @@ import { Bodywork } from './Bodywork.js';
 export const chassisTuning = {
   inertiaScale: 1.3,         // above 1 makes it slower to pitch and roll than the parts' masses alone suggest
   airControlTorque: 2200,    // N·m from the stick while airborne with the rotors stowed
+  airYawTorque: 900,         // N·m of mid-air yaw from the steering itself
   airborneSpinDamping: 2.0,  // 1/s; calms pitch and roll tumbling off ramp lips, so jumps land wheels-down more often
 };
 
@@ -28,6 +29,7 @@ export class Chassis {
   inertia = new THREE.Vector3(); // kg·m² about the chassis's own right, up and back axes
   dragArea;                    // m², from the design's panels
   downforceSurfaces;           // [{ position, area }] chassis-local
+  designMass = 0;               // kg; Rapier's body.mass() reads 0 until the first world step
 
   // Pose at the start of the current physics step, used by every force calculation.
   position = new THREE.Vector3();
@@ -63,6 +65,7 @@ export class Chassis {
 
   /** Sets mass, centre of mass and inertia; colliders have no density, so these are the whole story. */
   applyMassProperties({ mass, centerOfMass, inertia }) {
+    this.designMass = mass;
     this.inertia.copy(inertia).multiplyScalar(chassisTuning.inertiaScale);
     this.body.setAdditionalMassProperties(mass, centerOfMass, this.inertia, { x: 0, y: 0, z: 0, w: 1 }, true);
   }
@@ -117,7 +120,10 @@ export class Chassis {
   forwardSpeed() { return this.linearVelocity().dot(this.forward()); }
   speed() { return this.linearVelocity().length(); }
 
-  mass() { return this.body.mass(); }
+  /** The design's mass. Kept from what we set: Rapier reports its own number only after the first step. */
+  mass() { return this.designMass; }
+  /** Total downforce area (m²) of the design's wings and splitters, for grip-vs-speed estimates. */
+  downforceArea() { return this.downforceSurfaces.reduce((sum, surface) => sum + surface.area, 0); }
   localCenterOfMass(target = new THREE.Vector3()) { return target.copy(this.body.localCom()); }
   worldCenterOfMass(target = new THREE.Vector3()) { return target.copy(this.body.worldCom()); }
   /**
@@ -154,6 +160,12 @@ export class Chassis {
     const torque = this.right().multiplyScalar(-tiltForward * chassisTuning.airControlTorque)
       .add(this.forward().multiplyScalar(tiltRight * chassisTuning.airControlTorque));
     this.twist(torque);
+  }
+
+  /** Steering while airborne yaws the nose around, so a jump can be lined up for the landing. */
+  applyAirYaw(steer) {
+    if (Math.abs(steer) < 0.05) return;
+    this.twist(this.up().multiplyScalar(-steer * chassisTuning.airYawTorque));
   }
 
   /** Slows pitching and rolling (not turning) while airborne, by a fraction of the spin each second. */

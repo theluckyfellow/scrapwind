@@ -7,10 +7,15 @@ export const wheelTuning = {
   dampingRatio: 0.5,          // suspension damping relative to critical; higher settles faster but rides harsher
   stiffnessScale: 1.0,        // multiplies the auto-tuned spring rates
   tyreGrip: 1.0,              // multiplies every tyre's own grip
-  peakSlipDegrees: 8,         // slip angle where sideways grip peaks
-  slidingGrip: 0.78,          // fraction of peak sideways grip left at big slip angles (drifting)
-  kineticGrip: 0.8,           // fraction of grip left once a tyre is asked for more than it has
+  peakSlipDegrees: 10,        // slip angle where sideways grip peaks
+  slidingGrip: 0.85,          // fraction of peak sideways grip left at big slip angles (drifting)
+  kineticGrip: 0.85,          // fraction of grip left once a tyre is asked for more than it has
   tyreForceLift: 0.35,        // 0 = tyre forces act at the ground, 1 = at the centre of mass; higher resists rollovers
+  loadSensitivity: 0.12,      // grip fades by this power of load over resting: low, wide builds keep more of their grip
+  peakSlipRatio: 0.2,         // wheelspin share where forward grip peaks
+  slidingSlipRatio: 0.85,     // fully sliding forward beyond this
+  wheelInertiaScale: 1.4,     // tyre plus hub motor rotational inertia
+  camberThrust: 0.6,          // sideways push per newton of load, per radian of tyre lean
 };
 
 // How the suspension follows ride height: more clearance buys more travel and softer springs (and a higher
@@ -28,13 +33,13 @@ const LOW_SPEED_FLOOR = 1.5;      // m/s
 const LATERAL_HOLD = 0.5;
 // How far past its grip a tyre must be pushed before it is fully on kinetic (sliding) grip.
 const OVERLOAD_BLEND = 0.5;
-const WHEELSPIN_SURPLUS = 45;     // rad/s of extra spin at full wheelspin
-const SPIN_RESPONSE = 14;         // 1/s, how fast a locked or spinning wheel reaches its target spin
+const SPIN_RESPONSE = 14;         // 1/s, how fast airborne wheels slow when braked
 const AIR_SPIN_PER_TORQUE = 0.08; // rad/s² of free spin per N·m of drive while airborne (visual only)
 const AIR_SPIN_DECAY = 0.6;       // 1/s
 const DROOP_RATE = 3;             // m/s the wheel drops when it leaves the ground
 // A stalled motor still draws current; count power as if the tyre were rolling at least this fast.
 const MIN_POWER_SPEED = 2;        // m/s
+const TOE_DRAG = 0.2;             // rolling resistance fraction per radian of toe angle
 
 const TYRE_COLOR = 0x2a2522;
 const MOTOR_COLOR = 0x3f8f8a;
@@ -52,11 +57,14 @@ export class Wheel extends Part {
   side;                         // −1 left, +1 right, 0 centre line
   steering = false;
   steerAngle = 0;               // radians, positive steers right
+  toeAngle = 0;                 // radians added to the wheel's heading; toe-in points the pair inward
+  camberAngle = 0;              // radians of static lean, tops of the tyre toward the centre line
   restingLoad = 0;              // N this wheel carries when the vehicle sits still
   rayTop = new THREE.Vector3(); // chassis-local: the hub's position at full compression
   restLength = 0;               // m from full compression to full droop
   travel = 0;                   // m of compression room above the resting position
   springStiffness = 0;
+  springScale = 1;              // the design's spring-rate dial; multiplies the auto-tuned stiffness
   damping = 0;
   inContact = false;
   compression = 0;              // m from full droop; can pass restLength when squashed into the bump stop
@@ -68,9 +76,11 @@ export class Wheel extends Part {
   spinAngle = 0;
   slipAngle = 0;
   sliding = false;
+  tractionAssist = false;       // assisted driving: the motor won't wind the tyre past peak slip
   brakingPower = 0;             // W the brakes turned into heat last step, for regeneration
   hubGroup = new THREE.Group();
   steerGroup = new THREE.Group();
+  alignmentGroup = new THREE.Group();
   tyre;
   strut;
 
@@ -95,6 +105,32 @@ export class Wheel extends Part {
     this.steering = steering;
   }
 
+  /** Wheel alignment in degrees: toe-in (positive) and camber (tops inward, positive). */
+  setAlignment(toeDegrees, camberDegrees) {
+    this.toeAngle = -this.side * THREE.MathUtils.degToRad(toeDegrees);
+    this.camberAngle = THREE.MathUtils.degToRad(camberDegrees);
+    this.alignmentGroup.rotation.z = this.side * this.camberAngle;
+  }
+
+  /** The design's spring-rate dial; the next fitSuspension picks it up. */
+  setSpringScale(scale) {
+    this.springScale = scale;
+  }
+
+  /** This tyre's peak friction coefficient here and now: model × surface × load sensitivity. */
+  gripEstimate() {
+    if (!this.inContact) return this.model.grip;
+    const looseness = this.ground.surface.loose ? this.model.looseGrip : 1;
+    return this.model.grip * looseness * this.ground.surface.grip;
+  }
+
+  /** The contact point, surface and slide state, for the dust. */
+  contact() {
+    return this.inContact
+      ? { point: this.ground.point, surface: this.ground.surface, sliding: this.sliding }
+      : null;
+  }
+
   /** Sets the steering angle in radians; positive steers right. */
   setSteerAngle(angle) {
     this.steerAngle = this.steering ? angle : 0;
@@ -109,7 +145,7 @@ export class Wheel extends Part {
     this.travel = Math.max(MIN_TRAVEL, rideHeight * TRAVEL_PER_RIDE_HEIGHT);
     this.restLength = this.travel + droop;
     this.rayTop.set(hub[0], hub[1] + this.travel, hub[2]);
-    this.springStiffness = (restingLoad / droop) * wheelTuning.stiffnessScale;
+    this.springStiffness = (restingLoad / droop) * wheelTuning.stiffnessScale * this.springScale;
     this.damping = 2 * wheelTuning.dampingRatio * Math.sqrt(this.springStiffness * (restingLoad / GRAVITY));
     if (!this.inContact) this.springLength = this.travel;
   }
@@ -175,7 +211,9 @@ export class Wheel extends Part {
 
   /**
    * Works out the tyre's push from motor torque, braking and how it is sliding, limited by grip × load.
-   * driveTorque in N·m, brakeForce and handbrakeForce in N.
+   * Forward drive comes from the slip between the tyre's surface speed and the ground (so wheelspin,
+   * burnouts and boost launches all fall out of it); brakes push directly, ABS-style, so ordinary braking
+   * never locks a wheel — only the handbrake does. driveTorque in N·m, brakeForce and handbrakeForce in N.
    */
   grip(chassis, track, driveTorque, brakeForce, handbrakeForce, dt) {
     this.brakingPower = 0;
@@ -189,11 +227,16 @@ export class Wheel extends Part {
     const surface = this.ground.surface;
     const normal = this.ground.normal;
     const looseness = surface.loose ? this.model.looseGrip : 1;
-    const maxForce = wheelTuning.tyreGrip * this.model.grip * looseness * surface.grip * this.load;
+    // A tyre asked to carry more than its resting share holds a little less grip per newton: load
+    // transfer costs cornering, so low, wide builds that transfer less get to keep more of their grip.
+    const loadFactor = THREE.MathUtils.clamp(
+      (this.restingLoad / Math.max(this.load, 1)) ** wheelTuning.loadSensitivity, 0.7, 1.3,
+    );
+    const maxForce = wheelTuning.tyreGrip * this.model.grip * looseness * surface.grip * loadFactor * this.load;
 
-    // The tyre's own axes, laid flat on the ground it is touching.
+    // The tyre's own axes, laid flat on the ground it is touching, with the alignment angles folded in.
     const up = chassis.up();
-    const heading = chassis.forward().applyAxisAngle(up, -this.steerAngle);
+    const heading = chassis.forward().applyAxisAngle(up, -(this.steerAngle + this.toeAngle));
     heading.addScaledVector(normal, -heading.dot(normal)).normalize();
     const side = new THREE.Vector3().crossVectors(heading, normal);
 
@@ -202,15 +245,21 @@ export class Wheel extends Part {
     const lateralSpeed = velocity.dot(side);
     const carriedMass = this.load / GRAVITY;
 
-    // Sideways: the tyre curve at speed, a direct hold against creeping when slow; whichever is gentler.
+    // Sideways: the tyre curve at speed, a direct hold against creeping when slow, and camber thrust
+    // (a leaning tyre pushes toward its lean), whichever the friction circle allows.
     this.slipAngle = Math.atan2(lateralSpeed, Math.max(Math.abs(longitudinalSpeed), LOW_SPEED_FLOOR));
     const curveForce = maxForce * lateralGripCurve(this.slipAngle);
     const holdForce = (Math.abs(lateralSpeed) * carriedMass / dt) * LATERAL_HOLD;
-    let lateral = -Math.sign(lateralSpeed) * Math.min(curveForce, holdForce);
+    const lean = up.dot(side) - this.side * this.camberAngle;
+    const camberForce = maxForce * wheelTuning.camberThrust * lean;
+    let lateral = -Math.sign(lateralSpeed) * Math.min(curveForce, holdForce) + camberForce;
 
-    // Along: drive, plus brakes and rolling resistance, which may stop the wheel but never push it backwards.
-    const driveForce = driveTorque / radius;
-    const stoppingDemand = brakeForce + handbrakeForce + surface.rollingResistance * this.load;
+    // Along: drive from slip, plus brakes and rolling resistance, which may stop the wheel but never push it backwards.
+    const surfaceSpeed = this.spinSpeed * radius;
+    const slipRatio = (surfaceSpeed - longitudinalSpeed) / Math.max(Math.abs(longitudinalSpeed), LOW_SPEED_FLOOR);
+    const driveForce = maxForce * longitudinalGripCurve(slipRatio);
+    const stoppingDemand = brakeForce + handbrakeForce
+      + surface.rollingResistance * this.load + Math.abs(this.toeAngle) * this.load * TOE_DRAG;
     const stoppingForce = Math.min(stoppingDemand, (Math.abs(longitudinalSpeed) * carriedMass) / dt);
     let longitudinal = driveForce - Math.sign(longitudinalSpeed) * stoppingForce;
     this.brakingPower = Math.min(brakeForce, stoppingForce) * Math.abs(longitudinalSpeed);
@@ -236,7 +285,7 @@ export class Wheel extends Part {
     this.push(chassis, force, point, 'tyre');
     track.pushBack(this.ground, force, dt);
 
-    this.updateSpin(longitudinalSpeed, driveForce, stoppingDemand, overload, dt);
+    this.updateSpin(longitudinalSpeed, driveTorque, maxForce, handbrakeForce, dt);
   }
 
   /** What Telemetry shows for this wheel. */
@@ -254,7 +303,7 @@ export class Wheel extends Part {
   updateVisual(frameSeconds) {
     this.spinAngle = (this.spinAngle + this.spinSpeed * frameSeconds) % (Math.PI * 2);
     this.hubGroup.position.set(this.rayTop.x, this.rayTop.y - this.springLength, this.rayTop.z);
-    this.steerGroup.rotation.y = -this.steerAngle;
+    this.steerGroup.rotation.y = -(this.steerAngle + this.toeAngle);
     this.tyre.rotation.x = -this.spinAngle;
 
     // Stretch the strut from its mount on the frame down to the hub.
@@ -288,15 +337,37 @@ export class Wheel extends Part {
     this.springLength = Math.min(this.springLength + DROOP_RATE * dt, this.restLength);
   }
 
-  updateSpin(longitudinalSpeed, driveForce, stoppingDemand, overload, dt) {
-    const rollingSpin = longitudinalSpeed / this.model.radius;
-    if (!this.sliding) {
+  /**
+   * Spins the wheel: coasting, it tracks the ground exactly; driven or handbraked, it integrates torque
+   * against the road's reaction and its own inertia, which is where wheelspin and lockups come from.
+   * The loop is stiff at low speed (light wheels, strong tyres), so it runs in short sub-steps.
+   */
+  updateSpin(longitudinalSpeed, driveTorque, maxForce, handbrakeForce, dt) {
+    const radius = this.model.radius;
+    const rollingSpin = longitudinalSpeed / radius;
+    const slipOf = spin => (spin * radius - longitudinalSpeed) / Math.max(Math.abs(longitudinalSpeed), LOW_SPEED_FLOOR);
+    if (Math.abs(driveTorque) < 5 && handbrakeForce < 1 && Math.abs(slipOf(this.spinSpeed)) < 0.05) {
       this.spinSpeed = rollingSpin;
       return;
     }
-    const braking = stoppingDemand > Math.abs(driveForce);
-    const targetSpin = braking ? 0 : rollingSpin + Math.sign(driveForce) * WHEELSPIN_SURPLUS * overload;
-    this.spinSpeed += (targetSpin - this.spinSpeed) * (1 - Math.exp(-SPIN_RESPONSE * dt));
+    // Traction assist: past peak slip, the motor only gets as much rope as the tyre can use anyway.
+    if (this.tractionAssist && Math.abs(slipOf(this.spinSpeed)) > wheelTuning.peakSlipRatio) {
+      const cap = maxForce * radius;
+      driveTorque = THREE.MathUtils.clamp(driveTorque, -cap, cap);
+    }
+    const inertia = wheelTuning.wheelInertiaScale * this.model.mass * radius * radius * 0.5;
+    const substeps = 4;
+    for (let step = 0; step < substeps; step++) {
+      const reaction = maxForce * longitudinalGripCurve(slipOf(this.spinSpeed));
+      this.spinSpeed += ((driveTorque - reaction * radius) / inertia) * (dt / substeps);
+    }
+    // The handbrake drags the wheel toward locked; a locked wheel stays locked.
+    if (handbrakeForce > 1) {
+      this.spinSpeed *= Math.exp(-Math.min(handbrakeForce * radius / inertia, 25) * dt);
+      if (Math.abs(this.spinSpeed) < Math.abs(rollingSpin) * 0.15) this.spinSpeed = 0;
+    }
+    // Nearly stopped with no drive, don't twitch.
+    if (Math.abs(longitudinalSpeed) < 0.3 && Math.abs(driveTorque) < 5) this.spinSpeed = rollingSpin;
   }
 
   spinInAir(driveTorque, stoppingForce, dt) {
@@ -321,7 +392,8 @@ export class Wheel extends Part {
     this.tyre.add(toonMesh(new THREE.BoxGeometry(width + 0.08, radius * 1.1, 0.07), STRUT_COLOR, { outline: 0 }));
 
     this.steerGroup.add(this.tyre);
-    this.hubGroup.add(this.steerGroup);
+    this.alignmentGroup.add(this.steerGroup);
+    this.hubGroup.add(this.alignmentGroup);
     this.visual.add(this.hubGroup);
 
     this.strut = toonMesh(new THREE.CylinderGeometry(0.045, 0.045, 1, 6), STRUT_COLOR, { outline: 0.012 });
@@ -336,4 +408,18 @@ function lateralGripCurve(slipAngle) {
   if (slip <= peak) return slip / peak;
   const fade = Math.min((slip - peak) / (2 * peak), 1);
   return 1 - (1 - wheelTuning.slidingGrip) * fade;
+}
+
+/**
+ * Forward grip (−1..1 of peak, signed by slip direction) for a slip ratio: peaks at a little slip,
+ * then fades to slidingGrip once the tyre is well and truly spinning or locked.
+ */
+function longitudinalGripCurve(slipRatio) {
+  const peak = wheelTuning.peakSlipRatio;
+  const slide = wheelTuning.slidingSlipRatio;
+  const magnitude = Math.abs(slipRatio);
+  let fraction;
+  if (magnitude <= peak) fraction = magnitude / peak;
+  else fraction = 1 - (1 - wheelTuning.slidingGrip) * THREE.MathUtils.clamp((magnitude - peak) / (slide - peak), 0, 1);
+  return Math.sign(slipRatio) * fraction;
 }

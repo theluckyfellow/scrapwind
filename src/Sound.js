@@ -1,0 +1,138 @@
+// Procedural audio: no assets, everything synthesized. Wind, the hub motors, the rotors, boost,
+// surge pads. The context starts on the first input gesture (browser autoplay rules); every update
+// just moves gains and pitches toward their targets, so the frame rate never matters.
+const MASTER_GAIN = 0.4;
+const WIND_FULL_SPEED = 55;   // m/s where the wind reaches full voice
+const MOTOR_PITCH_PER_SPIN = 2.6; // Hz of motor tone per rad/s of average wheel spin
+const MOTOR_BASE_HZ = 46;
+const ROTOR_BASE_HZ = 110;
+const ROTOR_PITCH_PER_THRUST = 340; // Hz above base at full thrust
+const CHIME_HZ = [880, 1318];
+
+export class Sound {
+  context = null;
+
+  constructor() {
+    window.addEventListener('pointerdown', () => this.ensure());
+    window.addEventListener('keydown', () => this.ensure());
+  }
+
+  /** Creates (or resumes) the audio graph; called on the first input gesture. */
+  ensure() {
+    if (this.context) {
+      if (this.context.state === 'suspended') this.context.resume();
+      return;
+    }
+    const context = new AudioContext();
+    this.context = context;
+    const master = context.createGain();
+    master.gain.value = MASTER_GAIN;
+    master.connect(context.destination);
+    this.master = master;
+
+    // Wind: looped white noise through a bandpass that opens up with speed.
+    const noise = context.createBufferSource();
+    noise.buffer = this.noiseBuffer(context);
+    noise.loop = true;
+    this.windFilter = context.createBiquadFilter();
+    this.windFilter.type = 'bandpass';
+    this.windFilter.frequency.value = 300;
+    this.windFilter.Q.value = 0.7;
+    this.windGain = context.createGain();
+    this.windGain.gain.value = 0;
+    noise.connect(this.windFilter).connect(this.windGain).connect(master);
+    noise.start();
+
+    // The hub motors: a raspy saw over a sub sine, both through a lowpass.
+    this.motorFilter = context.createBiquadFilter();
+    this.motorFilter.type = 'lowpass';
+    this.motorFilter.frequency.value = 700;
+    this.motorGain = context.createGain();
+    this.motorGain.gain.value = 0;
+    this.motorOsc = context.createOscillator();
+    this.motorOsc.type = 'sawtooth';
+    this.motorSub = context.createOscillator();
+    this.motorSub.type = 'sine';
+    this.motorOsc.connect(this.motorFilter);
+    this.motorSub.connect(this.motorFilter);
+    this.motorFilter.connect(this.motorGain).connect(master);
+    this.motorOsc.start();
+    this.motorSub.start();
+
+    // The rotors: a thin triangle tone, pitch and level riding the thrust.
+    this.rotorGain = context.createGain();
+    this.rotorGain.gain.value = 0;
+    this.rotorOsc = context.createOscillator();
+    this.rotorOsc.type = 'triangle';
+    this.rotorOsc.connect(this.rotorGain).connect(master);
+    this.rotorOsc.start();
+
+    // Boost: the noise again, high-passed to a hiss/crackle.
+    const boostNoise = context.createBufferSource();
+    boostNoise.buffer = this.noiseBuffer(context);
+    boostNoise.loop = true;
+    const boostFilter = context.createBiquadFilter();
+    boostFilter.type = 'highpass';
+    boostFilter.frequency.value = 2800;
+    this.boostGain = context.createGain();
+    this.boostGain.gain.value = 0;
+    boostNoise.connect(boostFilter).connect(this.boostGain).connect(master);
+    boostNoise.start();
+  }
+
+  /** Moves every voice toward the vehicle's current state; Game calls this once per frame. */
+  update(vehicle, frameSeconds) {
+    if (!this.context) return;
+    const ease = (param, value) => param.setTargetAtTime(value, this.context.currentTime, Math.min(frameSeconds, 0.1) * 2);
+    const speed = vehicle.speed();
+
+    const windLevel = Math.pow(THREE.MathUtils.clamp(speed / WIND_FULL_SPEED, 0, 1), 1.6) * 0.7;
+    ease(this.windGain.gain, windLevel);
+    ease(this.windFilter.frequency, 300 + speed * 34);
+
+    const wheels = vehicle.wheels();
+    const spin = wheels.length
+      ? wheels.reduce((sum, wheel) => sum + Math.abs(wheel.spin()), 0) / wheels.length
+      : 0;
+    const powerFraction = vehicle.maxPower() > 0
+      ? THREE.MathUtils.clamp(vehicle.powerDraw() / vehicle.maxPower(), 0, 1.5) : 0;
+    const motorHz = MOTOR_BASE_HZ + spin * MOTOR_PITCH_PER_SPIN;
+    ease(this.motorOsc.frequency, motorHz);
+    ease(this.motorSub.frequency, motorHz / 2);
+    ease(this.motorGain.gain, 0.03 + powerFraction * 0.22);
+
+    const rotors = vehicle.rotors();
+    const thrust = rotors.length
+      ? rotors.reduce((sum, rotor) => sum + rotor.thrust / rotor.maxThrust(), 0) / rotors.length : 0;
+    ease(this.rotorOsc.frequency, ROTOR_BASE_HZ + thrust * ROTOR_PITCH_PER_THRUST);
+    ease(this.rotorGain.gain, rotors.length ? 0.03 + thrust * 0.13 : 0);
+
+    ease(this.boostGain.gain, vehicle.boosting() ? 0.22 : 0);
+  }
+
+  /** A two-note chime when a surge pad takes hold. */
+  pad() {
+    if (!this.context) return;
+    const context = this.context;
+    CHIME_HZ.forEach((frequency, index) => {
+      const osc = context.createOscillator();
+      const gain = context.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = frequency;
+      const start = context.currentTime + index * 0.09;
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(0.22, start + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.5);
+      osc.connect(gain).connect(this.master);
+      osc.start(start);
+      osc.stop(start + 0.55);
+    });
+  }
+
+  noiseBuffer(context) {
+    const buffer = context.createBuffer(1, context.sampleRate * 2, context.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let index = 0; index < data.length; index++) data[index] = Math.random() * 2 - 1;
+    return buffer;
+  }
+}

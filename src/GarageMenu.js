@@ -1,15 +1,39 @@
-import { BODIES, WHEELS, BATTERIES, ROTORS, PANEL_SLOTS, PAINTS, RIDE_HEIGHT_RANGE } from './catalog.js';
-import { Blueprint } from './Blueprint.js';
+import { BODIES, WHEELS, BATTERIES, BOOSTERS, ROTORS, BALLASTS, GYROS, PANEL_SLOTS, PAINTS, RIDE_HEIGHT_RANGE } from './catalog.js';
+import { Blueprint, TUNING_RANGES } from './Blueprint.js';
 import { PRESETS } from './presets.js';
 import { element, button, downloadText } from './dom.js';
 
 const SAVED_DESIGNS_KEY = 'scrapwind-designs';
 const ARM_SECONDS = 3;     // a body switch that would clear parts waits this long for a second click
+const ALIGNMENT_KEYS = [
+  ['frontToe', 'Front toe', -1.5, 1.5],
+  ['frontCamber', 'Front camber', -4, 4],
+  ['rearToe', 'Rear toe', -1.5, 1.5],
+  ['rearCamber', 'Rear camber', -4, 4],
+];
+
+// The handling dials: [key, label, format]; the slider ranges come from the Blueprint's TUNING_RANGES.
+const TUNING_KEYS = [
+  ['torqueSplit', 'Torque split', value => `${Math.round(value * 100)}% rear`],
+  ['springRate', 'Spring rate', value => `${value.toFixed(2)}×`],
+  ['antiRoll', 'Anti-roll bars', value => `${value.toFixed(2)}×`],
+  ['brakeBias', 'Brake bias', value => `${Math.round(value * 100)}% front`],
+  ['regen', 'Regen braking', value => `${Math.round(value * 100)}%`],
+];
+
+// The control setups: [key, label, [value, option text]].
+const CONTROL_CHOICES = [
+  ['drive', 'Driving', [['advanced', 'Advanced — raw throttle, burnouts, drifts'], ['simple', 'Assisted — smooth, stable, no wheelspin']]],
+  ['flight', 'Flying', [['assist', 'Hover assist — self-levelling, holds height'], ['acro', 'Acro — rate control for trick flying']]],
+];
 
 const PART_GROUPS = [
   { part: 'wheel', title: 'Wheel units', models: WHEELS, detail: model => `${model.radius * 2} m · ${kilowatts(model.motorPower)} kW motor` },
   { part: 'battery', title: 'Batteries', models: BATTERIES, detail: model => `${model.capacity / 1000} kWh · ${kilowatts(model.maxPower)} kW · ${model.mass} kg` },
+  { part: 'surge', title: 'Surge capacitors', models: BOOSTERS, detail: model => `${kilowatts(model.surgeWatts)} kW boost · ${(model.surgeJoules / model.surgeWatts).toFixed(1)} s · ${model.mass} kg` },
   { part: 'rotor', title: 'Rotors', models: ROTORS, detail: model => `${(model.maxThrust / 1000).toFixed(1)} kN lift · ${model.mass} kg` },
+  { part: 'gyro', title: 'Gyro stabilizers', models: GYROS, detail: model => `${model.mass} kg · fights the roll` },
+  { part: 'ballast', title: 'Ballast', models: BALLASTS, detail: model => `${model.mass} kg · puts weight where you want it` },
 ];
 
 const STAT_ROWS = [
@@ -17,6 +41,8 @@ const STAT_ROWS = [
   ['Weight front / rear', stats => `${Math.round(stats.frontShare * 100)} / ${Math.round((1 - stats.frontShare) * 100)}`],
   ['Motors', stats => `${kilowatts(stats.wheelPower)} kW`],
   ['Batteries', stats => `${kilowatts(stats.batteryPower)} kW · ${(stats.capacity / 1000).toFixed(1)} kWh`],
+  ['Boost', stats => (stats.surgeWatts > 0 ? `${kilowatts(stats.surgeWatts)} kW · ${stats.boostSeconds.toFixed(1)} s (B / L3)` : 'no capacitors')],
+  ['Stabilizers', stats => (stats.gyroCount ? `${stats.gyroCount} gyro${stats.gyroCount > 1 ? 's' : ''}` : 'none')],
   ['Top speed', stats => `${Math.round(stats.topSpeed * 3.6)} km/h`],
   ['Range at 60 km/h', stats => `${Math.round(stats.rangeKilometres)} km`],
   ['Rotor lift', stats => (stats.rotorCount ? `${Math.round(stats.lift * 100)}% of weight` : 'no rotors')],
@@ -42,6 +68,9 @@ export class GarageMenu {
   nameInput;
   rideSlider;
   rideValue;
+  alignmentSliders = new Map();
+  tuningSliders = new Map();
+  controlSelects = new Map();
   mirrorBox;
   rotorsBox;
   warningList;
@@ -83,6 +112,15 @@ export class GarageMenu {
     if (document.activeElement !== this.nameInput) this.nameInput.value = blueprint.name;
     this.rideSlider.value = blueprint.rideHeight;
     this.rideValue.textContent = `${blueprint.rideHeight.toFixed(2)} m`;
+    for (const [key, { slider, readout }] of this.alignmentSliders) {
+      if (document.activeElement !== slider) slider.value = blueprint.alignment[key];
+      readout.textContent = `${blueprint.alignment[key].toFixed(1)}°`;
+    }
+    for (const [key, { slider, readout, format }] of this.tuningSliders) {
+      if (document.activeElement !== slider) slider.value = blueprint.tuning[key];
+      readout.textContent = format(blueprint.tuning[key]);
+    }
+    for (const [key, select] of this.controlSelects) select.value = blueprint.controls[key];
     this.mirrorBox.checked = this.garage.mirroring();
     this.rotorsBox.checked = this.garage.showingRotorsOut();
 
@@ -137,6 +175,39 @@ export class GarageMenu {
     this.rideValue = element('span', 'garage-ride-value', ride);
     element('div', 'garage-note', panel, 'Higher clears rocks and soaks up landings; lower corners flatter. The test rig can change it while driving (D-pad, or Z and X).');
 
+    element('div', 'garage-heading', panel, 'Wheel alignment');
+    this.alignmentSliders = new Map();
+    for (const [key, label, min, max] of ALIGNMENT_KEYS) {
+      const format = value => `${value.toFixed(1)}°`;
+      const { slider, readout } = this.sliderRow(panel, label, min, max, 0.1, format,
+        value => this.edit(blueprint => blueprint.setAlignment(key, value)));
+      this.alignmentSliders.set(key, { slider, readout });
+    }
+    element('div', 'garage-note', panel, 'Toe-in sharpens turn-in but scrubs speed; camber (tops inward) helps the tyres lean through corners.');
+
+    element('div', 'garage-heading', panel, 'Handling');
+    this.tuningSliders = new Map();
+    for (const [key, label, format] of TUNING_KEYS) {
+      const [min, max] = TUNING_RANGES[key];
+      const { slider, readout } = this.sliderRow(panel, label, min, max, 0.01, format,
+        value => this.edit(blueprint => blueprint.setTuning(key, value)));
+      this.tuningSliders.set(key, { slider, readout, format });
+    }
+    element('div', 'garage-note', panel, 'Rear-biased torque swings the tail out on power; stiff springs and bars corner flat but skip over bumps; front-biased brakes are steady, rear-biased ones help rotate.');
+
+    for (const [key, label, options] of CONTROL_CHOICES) {
+      const row = element('div', 'garage-ride', panel);
+      element('span', 'garage-ride-value', row, label);
+      const select = element('select', '', row);
+      for (const [value, text] of options) {
+        const option = element('option', '', select, text);
+        option.value = value;
+      }
+      select.addEventListener('change', () => this.edit(blueprint => blueprint.setControls(key, select.value)));
+      this.controlSelects.set(key, select);
+    }
+    element('div', 'garage-note', panel, 'Acro flying takes practice: the sticks become rotation rates and there is no height hold. It suits builds that are mostly rotors.');
+
     element('div', 'garage-heading', panel, 'Paint');
     const paints = element('div', 'garage-swatches', panel);
     for (const paint of PAINTS) {
@@ -181,6 +252,21 @@ export class GarageMenu {
     this.fillDesignList();
 
     button('garage-drive', panel, 'Test drive  ▶', () => this.onTestDrive(this.garage.blueprint));
+  }
+
+  /** A labelled range slider row; onInput gets the numeric value, the readout shows format(value). */
+  sliderRow(panel, label, min, max, step, format, onInput) {
+    const row = element('div', 'garage-ride', panel);
+    element('span', 'garage-ride-value', row, label);
+    const slider = element('input', '', row);
+    Object.assign(slider, { type: 'range', min, max, step });
+    const readout = element('span', 'garage-ride-value', row);
+    slider.addEventListener('input', () => {
+      const value = Number(slider.value);
+      readout.textContent = format(value);
+      onInput(value);
+    });
+    return { slider, readout };
   }
 
   /** Applies an edit to the design and, unless it only changed a label, rebuilds the preview. */

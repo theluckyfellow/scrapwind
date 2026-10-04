@@ -1,13 +1,14 @@
 import * as THREE from 'three';
 import {
-  BODIES, WHEELS, BATTERIES, ROTORS, PANEL_SLOTS, PAINTS, RIDE_HEIGHT_RANGE,
+  BODIES, WHEELS, BATTERIES, BOOSTERS, ROTORS, BALLASTS, GYROS, PANEL_SLOTS, PAINTS, RIDE_HEIGHT_RANGE,
   TUBE_MASS_PER_METRE, BARE_FRAME_DRAG, DRIVER_MASS,
   frameTubes, bodySize, slotAnchor, wheelHubPosition, rotorHubPosition,
 } from './catalog.js';
-import { rotorPower } from './Rotor.js';
+import { rotorPower, rotorTuning } from './Rotor.js';
 import { balancedShares } from './balance.js';
 
-const MODELS = { wheel: WHEELS, battery: BATTERIES, rotor: ROTORS };
+const MODELS = { wheel: WHEELS, battery: BATTERIES, surge: BOOSTERS, rotor: ROTORS, ballast: BALLASTS, gyro: GYROS };
+const BOX_PARTS = ['battery', 'surge', 'ballast', 'gyro']; // solid boxes that must not overlap each other
 const DEFAULT_PANELS = { nose: 'panel', hood: 'panel', roof: 'panel', sides: 'doors', tail: 'panel', wing: 'none' };
 const MIRROR_EPSILON = 0.05;     // m; mounts this close to the centre line get no mirror twin
 const GRAVITY = 9.81;
@@ -19,10 +20,30 @@ const MIN_DRAG_COEFFICIENT = 0.25;
 const DRIVER_HEIGHT = 0.6;       // m above the floor, for the driver's mass
 const PART_GAP = 0.02;           // m two batteries must keep between them
 
+const ALIGNMENT_RANGE = { toe: 3, camber: 4 };  // degrees, either side of straight
+const ALIGNMENT_DEFAULTS = { frontToe: 0, frontCamber: 0, rearToe: 0, rearCamber: 0 };
+
+// The handling dials a design carries. torqueSplit: share of motor torque asked of the rear axle (0.5 = even).
+// brakeBias: share of braking asked of the front. springRate and antiRoll multiply the auto-tuned values.
+// regen: fraction of braking energy the batteries take back.
+export const TUNING_DEFAULTS = { torqueSplit: 0.5, springRate: 1, antiRoll: 1, brakeBias: 0.55, regen: 0.35 };
+// Control setups: how much help the vehicle gives. drive 'simple' smooths the pedals, cuts wheelspin
+// and leans harder on the stability assists; flight 'acro' turns the rotors into a rate-controlled
+// trick quad (no self-levelling, no height hold). Default: advanced driving, assisted hovering.
+export const CONTROL_MODES = { drive: ['advanced', 'simple'], flight: ['assist', 'acro'] };
+export const CONTROL_DEFAULTS = { drive: 'advanced', flight: 'assist' };
+export const TUNING_RANGES = {
+  torqueSplit: [0.2, 0.8],
+  springRate: [0.7, 1.5],
+  antiRoll: [0, 2],
+  brakeBias: [0.35, 0.7],
+  regen: [0, 0.9],
+};
+
 /**
  * Blueprint: a vehicle design. A tube body, the parts mounted on it (mirrored left to right when asked),
- * body panels, ride height and paint. Works out what the design weighs, where its centre of mass sits,
- * how its weight spreads over the wheels, its headline stats and what's wrong with it.
+ * body panels, wheel alignment, ride height and paint. Works out what the design weighs, where its centre
+ * of mass sits, how its weight spreads over the wheels, its headline stats and what's wrong with it.
  * Garage and GarageMenu edit it; Vehicle, Chassis and Bodywork are built from it. Saves as plain JSON.
  */
 export class Blueprint {
@@ -31,6 +52,9 @@ export class Blueprint {
   rideHeight = 0.35;
   paint = PAINTS[0];
   panels = { ...DEFAULT_PANELS };
+  alignment = { ...ALIGNMENT_DEFAULTS }; // degrees: toe-in and camber (tops inward), front and rear
+  tuning = { ...TUNING_DEFAULTS };       // the handling dials; see TUNING_DEFAULTS
+  controls = { ...CONTROL_DEFAULTS };    // control setups: see CONTROL_MODES
   mounts = [];                 // [{ id, part, model, position: [x, y, z], mirror }]
   adjustableRideHeight = true; // the test vehicle's privilege; later an upgrade
   nextMountId = 1;
@@ -42,6 +66,9 @@ export class Blueprint {
     if (typeof data.paint === 'string') this.paint = data.paint;
     if (typeof data.adjustableRideHeight === 'boolean') this.adjustableRideHeight = data.adjustableRideHeight;
     for (const [slot, style] of Object.entries(data.panels ?? {})) this.setPanel(slot, style);
+    for (const [key, degrees] of Object.entries(data.alignment ?? {})) this.setAlignment(key, degrees);
+    for (const [key, value] of Object.entries(data.tuning ?? {})) this.setTuning(key, value);
+    for (const [key, mode] of Object.entries(data.controls ?? {})) this.setControls(key, mode);
     for (const mount of data.mounts ?? []) {
       if (MODELS[mount.part]?.[mount.model] && Array.isArray(mount.position)) {
         this.addMount(mount.part, mount.model, mount.position, Boolean(mount.mirror));
@@ -62,6 +89,9 @@ export class Blueprint {
       paint: this.paint,
       adjustableRideHeight: this.adjustableRideHeight,
       panels: { ...this.panels },
+      alignment: { ...this.alignment },
+      tuning: { ...this.tuning },
+      controls: { ...this.controls },
       mounts: this.mounts.map(({ part, model, position, mirror }) => ({ part, model, position: [...position], mirror })),
     };
   }
@@ -82,6 +112,23 @@ export class Blueprint {
 
   setPanel(slot, style) {
     if (PANEL_SLOTS[slot]?.styles[style]) this.panels[slot] = style;
+  }
+
+  /** Sets one alignment angle in degrees: frontToe, frontCamber, rearToe or rearCamber. */
+  setAlignment(key, degrees) {
+    const limit = key.endsWith('Toe') ? ALIGNMENT_RANGE.toe : ALIGNMENT_RANGE.camber;
+    if (key in this.alignment) this.alignment[key] = THREE.MathUtils.clamp(degrees, -limit, limit);
+  }
+
+  /** Sets one handling dial: torqueSplit, springRate, antiRoll, brakeBias or regen. */
+  setTuning(key, value) {
+    const range = TUNING_RANGES[key];
+    if (range) this.tuning[key] = THREE.MathUtils.clamp(value, range[0], range[1]);
+  }
+
+  /** Sets a control setup: drive 'advanced'|'simple', flight 'assist'|'acro'. */
+  setControls(key, mode) {
+    if (CONTROL_MODES[key]?.includes(mode)) this.controls[key] = mode;
   }
 
   /** Switches to another tube body. Mount points belong to the old frame, so the parts come off. */
@@ -120,9 +167,14 @@ export class Blueprint {
     const model = MODELS[part][modelKey];
     const candidates = [position];
     if (mirror && Math.abs(position[0]) > MIRROR_EPSILON) candidates.push([-position[0], position[1], position[2]]);
-    const existing = this.placedParts().filter(placed => placed.part === part);
+    const placed = this.placedParts();
+    const existing = placed.filter(item => item.part === part);
+    const boxes = placed.filter(item => BOX_PARTS.includes(item.part));
     const checks = {
-      battery: () => batteryClash(model, candidates, existing),
+      battery: () => boxClash(model, candidates, boxes, 'part'),
+      surge: () => boxClash(model, candidates, boxes, 'part'),
+      ballast: () => boxClash(model, candidates, boxes, 'part'),
+      gyro: () => boxClash(model, candidates, boxes, 'part'),
       wheel: () => wheelClash(model, candidates, existing, this.rideHeight),
       rotor: () => rotorClash(model, candidates, existing),
     };
@@ -179,6 +231,8 @@ export class Blueprint {
     const wheels = placed.filter(item => item.part === 'wheel');
     const batteries = placed.filter(item => item.part === 'battery');
     const rotors = placed.filter(item => item.part === 'rotor');
+    const surges = placed.filter(item => item.part === 'surge');
+    const gyros = placed.filter(item => item.part === 'gyro');
     const sum = (items, key) => items.reduce((total, item) => total + item.model[key], 0);
 
     const wheelPower = sum(wheels, 'motorPower');
@@ -193,7 +247,10 @@ export class Blueprint {
 
     const loads = this.wheelLoads();
     const frontLoad = wheels.reduce((total, wheel, index) => total + (wheel.position[2] < centerOfMass.z ? loads[index] : 0), 0);
-    const hoverPower = rotors.reduce((total, rotor) => total + rotorPower(rotor.model, weight / rotors.length), 0);
+    const hoverPower = rotors.reduce((total, rotor) => total + rotorPower(rotor.model, weight / rotors.length), 0)
+      * rotorTuning.flightDrain; // what hovering really costs the batteries, rotor heat included
+    const surgeWatts = sum(surges, 'surgeWatts');
+    const surgeJoules = sum(surges, 'surgeJoules');
 
     return {
       mass,
@@ -206,9 +263,15 @@ export class Blueprint {
       lift: rotors.length ? sum(rotors, 'maxThrust') / weight : 0,
       hoverPower,
       hoverMinutes: hoverPower > 0 && hoverPower <= batteryPower ? (capacity / hoverPower) * 60 : 0,
+      surgeWatts,
+      boostSeconds: surgeWatts > 0 ? surgeJoules / surgeWatts : 0,
+      gripBalance: this.gripBalance(wheels, loads, centerOfMass),
+      rolloverFactor: this.rolloverFactor(wheels, centerOfMass),
       wheelCount: wheels.length,
       batteryCount: batteries.length,
       rotorCount: rotors.length,
+      surgeCount: surges.length,
+      gyroCount: gyros.length,
       rotorSpread: rotorSpread(rotors.map(rotor => rotorHubPosition(rotor.model, rotor.position))),
     };
   }
@@ -228,7 +291,38 @@ export class Blueprint {
         warnings.push(`Batteries can't power a hover: it needs ${kilowatts(stats.hoverPower)} kW, they give ${kilowatts(stats.batteryPower)} kW.`);
       }
     }
+    if (stats.wheelCount >= 3) {
+      if (stats.gripBalance < -0.07) warnings.push('Will understeer: the front slides first. Move weight forward, or fit grippier front tyres.');
+      if (stats.gripBalance > 0.07) warnings.push('Will oversteer: the rear slides first. Move weight back, or fit grippier rear tyres.');
+      if (stats.rolloverFactor < 1.05) warnings.push('Narrow and tall: it will roll in hard corners. Set the wheels wider or mount heavy parts lower.');
+      if (wheels.every(wheel => wheel.model.looseGrip < 0.85)) {
+        warnings.push('These tyres flounder in loose sand. Fit dune floaters or knobbly tyres before taking the western dune sea.');
+      }
+    }
     return warnings;
+  }
+
+  /** Front's share of tyre grip minus front's share of the weight: negative understeers, positive oversteers. */
+  gripBalance(wheels, loads, centerOfMass) {
+    if (wheels.length < 3) return 0;
+    let frontGrip = 0, allGrip = 0;
+    wheels.forEach((wheel, index) => {
+      const grip = wheel.model.grip * loads[index];
+      allGrip += grip;
+      if (wheel.position[2] < centerOfMass.z) frontGrip += grip;
+    });
+    if (allGrip <= 0) return 0;
+    const frontShare = wheels.reduce((total, wheel, index) => total + (wheel.position[2] < centerOfMass.z ? loads[index] : 0), 0)
+      / loads.reduce((sum, load) => sum + load, 0);
+    return frontGrip / allGrip - frontShare;
+  }
+
+  /** Half the mean track width over the centre-of-mass height: under ~1 it wants to roll over. */
+  rolloverFactor(wheels, centerOfMass) {
+    if (wheels.length < 3) return 2;
+    const trackHalf = wheels.reduce((sum, wheel) => sum + Math.abs(wheelHubPosition(wheel.model, wheel.position, this.rideHeight)[0]), 0) / wheels.length;
+    const comHeight = Math.max(centerOfMass.y, 0.05) + this.rideHeight;
+    return trackHalf / comHeight;
   }
 
   massItems() {
@@ -256,11 +350,12 @@ export class Blueprint {
   }
 }
 
-function batteryClash(model, candidates, existing) {
+/** Box-parts (batteries, capacitors) can't overlap each other or their own mirror twin. */
+function boxClash(model, candidates, existing, noun) {
   const boxes = existing.map(placed => box(placed.position, placed.model.size));
   const newBoxes = candidates.map(position => box(position, model.size));
   if (newBoxes.length === 2 && newBoxes[0].intersectsBox(newBoxes[1])) return 'Too close to the centre line to mirror. Turn mirroring off.';
-  return newBoxes.some(newBox => boxes.some(other => newBox.intersectsBox(other))) ? 'Overlaps another battery.' : null;
+  return newBoxes.some(newBox => boxes.some(other => newBox.intersectsBox(other))) ? `Overlaps another ${noun}.` : null;
 }
 
 function wheelClash(model, candidates, existing, rideHeight) {

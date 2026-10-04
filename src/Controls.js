@@ -5,7 +5,7 @@ const STICK_DEADZONE = 0.15;
 const GAMEPAD = {
   leftStickX: 0, leftStickY: 1, rightStickX: 2, rightStickY: 3,
   a: 0, b: 1, x: 2, y: 3, leftBumper: 4, rightBumper: 5, leftTrigger: 6, rightTrigger: 7,
-  back: 8, start: 9, rightStickClick: 11, dpadUp: 12, dpadDown: 13,
+  back: 8, start: 9, leftStickClick: 10, rightStickClick: 11, dpadUp: 12, dpadDown: 13,
 };
 
 const ANALOG_CONTROLS = [
@@ -19,6 +19,7 @@ const ANALOG_CONTROLS = [
   { name: 'descend', pad: pad => trigger(pad, GAMEPAD.leftTrigger), positiveKeys: ['ShiftLeft', 'ShiftRight'] },
   { name: 'yaw', pad: pad => trigger(pad, GAMEPAD.rightBumper) - trigger(pad, GAMEPAD.leftBumper), positiveKeys: ['KeyE'], negativeKeys: ['KeyQ'] },
   { name: 'rideHeight', pad: pad => trigger(pad, GAMEPAD.dpadUp) - trigger(pad, GAMEPAD.dpadDown), positiveKeys: ['KeyX'], negativeKeys: ['KeyZ'] },
+  { name: 'boost', pad: pad => pad.buttons[GAMEPAD.leftStickClick]?.value ?? 0, positiveKeys: ['KeyB'] },
   { name: 'lookRight', pad: pad => stick(pad, GAMEPAD.rightStickX), positiveKeys: ['KeyL'], negativeKeys: ['KeyJ'] },
   { name: 'lookUp', pad: pad => -stick(pad, GAMEPAD.rightStickY), positiveKeys: ['KeyI'], negativeKeys: ['KeyK'] },
 ];
