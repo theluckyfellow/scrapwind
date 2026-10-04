@@ -7,6 +7,7 @@ import { toonMesh, toonMaterial, faceted, addOutline } from './toon.js';
 /** Ground types: grip multiplies the tyre's grip; rolling resistance is a fraction of the tyre's load; loose ground favours paddle and knobbly tyres. */
 export const SURFACES = {
   dirt: { name: 'Gobi gravel', grip: 1.0, rollingResistance: 0.02, color: 0xc9a06b },
+  road: { name: 'Hardpan road', grip: 1.08, rollingResistance: 0.014, color: 0x8a6a44 },
   sand: { name: 'Dune sand', grip: 0.72, rollingResistance: 0.07, color: 0xf0cf8f, loose: true },
   mud: { name: 'Oasis mud', grip: 0.45, rollingResistance: 0.1, color: 0x6e4c35, loose: true },
   salt: { name: 'Salt crust', grip: 0.95, rollingResistance: 0.015, color: 0xe8e0d0 },
@@ -143,12 +144,16 @@ const BOOST_PADS = [
   { salt: true, radius: 8 },          // dead centre of the salt pan
   { roadZ: -1400, radius: 5 },        // halfway up the trade road
   { roadZ: -2250, radius: 6 },        // the Spire's foot
+  { fairStart: true, radius: 5 },     // the fair circuit's start/finish line, by the village gate
 ];
 // The New Silk Road: an elevated freight line crossing the whole valley south of home, riding up and
 // over the dune sea, container pods gliding past day and night, too big and too indifferent to notice
 // a buggy. The community of 拾风 (Scrapwind Yard) squats just north of it.
 const SILK_LINE = { z: 215, clearance: 12, minHeight: 24, segmentLength: 100, from: -2500, to: 2500, podSpeed: 18, podOffsets: [0, 1700, 3400], podColors: [0xb85c42, 0x3f8f8a, 0xd8d2c4] };
 const SETTLEMENT = { center: [90, 172] };
+// The fair: the Yard's fun ground inside its own race circuit, run on grid power and stubbornness.
+const FAIR = { center: [0, 430] };
+const FAIR_TRACK = { center: [0, 430], baseRadius: 220, wave: 30, wave2: 15, segments: 72, width: 8 };
 const STRING_POLES = [[-16, -10], [-4, -16], [8, -12], [14, 0], [6, 10], [-8, 8], [-16, -10]]; // a loop around the plaza, settlement-local
 
 const COLORS = {
@@ -180,6 +185,11 @@ const COLORS = {
   dish: 0xd8d2c4,
   wreck: 0x4a3a30,
   boostPad: 0x64ffe0,
+  road: 0x8a6a44,
+  booth: 0x6b4a33,
+  stripeRed: 0xd94f6a,
+  stripePale: 0xf2f0e4,
+  tent: 0x4f6fd9,
 };
 
 /**
@@ -203,6 +213,10 @@ export class TestTrack {
   boostPads = [];        // [{ x, z, y, radius }] the surge pads a vehicle can charge from
   silkPods = [];         // [{ body, group, offset, lane }] kinematic freight pods on the Silk Line
   podClock = 0;          // seconds of simulated Silk Line time
+  ferrisWheel;           // the fair's turning wheel; gondolas hang off it and stay level
+  ferrisGondolas = [];
+  carouselPlatform;
+  carouselCups = [];
   bloomUniform;          // the terrain shader's bloom circles
   spireAwakening = 0;
 
@@ -226,6 +240,8 @@ export class TestTrack {
     this.buildMegastructures();
     this.buildSilkLine();
     this.buildSettlement();
+    this.buildFairTrack();
+    this.buildFairground();
     this.buildBoostPads();
     this.buildProps();
     // Rapier only indexes new colliders for ray queries when the world steps: one step now (props settle
@@ -296,6 +312,14 @@ export class TestTrack {
     }
     for (const pod of this.silkPods) {
       pod.group.position.copy(pod.body.translation());
+    }
+    if (this.ferrisWheel) {
+      this.ferrisWheel.rotation.z = elapsedSeconds * 0.12;
+      for (const gondola of this.ferrisGondolas) gondola.rotation.z = -this.ferrisWheel.rotation.z;
+    }
+    if (this.carouselPlatform) {
+      this.carouselPlatform.rotation.y = elapsedSeconds * 0.45;
+      for (const cup of this.carouselCups) cup.rotation.y = elapsedSeconds * 2.2;
     }
   }
 
@@ -1247,21 +1271,8 @@ export class TestTrack {
     }
 
     // String lights around the plaza.
-    const bulbMaterial = toonMaterial(0xffd9a0, { emissive: 0xffd9a0, emissiveIntensity: 1.6 });
-    const bulbs = [];
     const poleTops = STRING_POLES.map(local => at(local, 3.6));
-    for (let pole = 0; pole < poleTops.length - 1; pole++) {
-      for (let step = 1; step < 12; step++) {
-        const t = step / 12;
-        const point = poleTops[pole].clone().lerp(poleTops[pole + 1], t);
-        point.y -= Math.sin(Math.PI * t) * 1.1; // the sag of the wire
-        bulbs.push(point);
-      }
-    }
-    const bulbMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(0.09, 6, 4), bulbMaterial, bulbs.length);
-    const matrix = new THREE.Matrix4();
-    bulbs.forEach((point, index) => bulbMesh.setMatrixAt(index, matrix.makeTranslation(point.x, point.y, point.z)));
-    this.scene.add(bulbMesh);
+    this.addStringLights(poleTops);
     for (const top of poleTops) {
       const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 3.6, 6));
       pole.position.set(top.x, top.y - 1.8, top.z);
@@ -1296,14 +1307,282 @@ export class TestTrack {
     this.addMerged(solarGeoms, toonMaterial(0x24344a));
   }
 
+  /**
+   * The fair circuit: packed earth laid round the fair ground, with whoops to bounce through, a
+   * table-top to catch air, glowing gates to thread, and a start/finish line by the village gate.
+   * The road is real surface: grippier and freer-rolling than the gravel around it.
+   */
+  buildFairTrack() {
+    const { segments: count, width } = FAIR_TRACK;
+    const geoms = [];
+    for (let index = 0; index < count; index++) {
+      const t0 = (index / count) * Math.PI * 2;
+      const t1 = ((index + 1) / count) * Math.PI * 2;
+      const [ax, az] = fairPoint(t0);
+      const [bx, bz] = fairPoint(t1);
+      const mx = (ax + bx) / 2;
+      const mz = (az + bz) / 2;
+      const length = Math.hypot(bx - ax, bz - az) + 1.5;
+      const heading = Math.atan2(bx - ax, bz - az);
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(width, 0.08, length));
+      mesh.position.set(mx, terrainHeight(mx, mz) + 0.04, mz);
+      mesh.rotation.y = heading;
+      this.mergeInstead(mesh, geoms);
+      const quaternion = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), heading);
+      this.addFixed(null, RAPIER.ColliderDesc.cuboid(width / 2, 0.04, length / 2)
+        .setTranslation(mx, terrainHeight(mx, mz) + 0.04, mz).setRotation(quaternion), 'road');
+    }
+    this.addMerged(geoms, toonMaterial(COLORS.road));
+
+    // The spur from the village sign to the start line.
+    const spur = [[70, 178], [35, 186], [0, 197]];
+    const spurGeoms = [];
+    for (let index = 0; index < spur.length - 1; index++) {
+      const [ax, az] = spur[index];
+      const [bx, bz] = spur[index + 1];
+      const mx = (ax + bx) / 2;
+      const mz = (az + bz) / 2;
+      const length = Math.hypot(bx - ax, bz - az) + 2;
+      const heading = Math.atan2(bx - ax, bz - az);
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(width, 0.08, length));
+      mesh.position.set(mx, terrainHeight(mx, mz) + 0.04, mz);
+      mesh.rotation.y = heading;
+      this.mergeInstead(mesh, spurGeoms);
+      const quaternion = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), heading);
+      this.addFixed(null, RAPIER.ColliderDesc.cuboid(width / 2, 0.04, length / 2)
+        .setTranslation(mx, terrainHeight(mx, mz) + 0.04, mz).setRotation(quaternion), 'road');
+    }
+    this.addMerged(spurGeoms, toonMaterial(COLORS.road));
+
+    for (const t of [0.18, 0.62]) this.buildWhoops(t);
+    this.buildTrackTableTop(0.5);
+    for (const t of [0.1, 0.4, 0.9]) this.buildTrackGate(t);
+  }
+
+  /** Whoops: a run of small lying cylinders across the road at circuit angle t. */
+  buildWhoops(t) {
+    const angle = t * Math.PI * 2;
+    const [px, pz] = fairPoint(angle);
+    const [tx, tz] = fairTangent(angle);
+    const geoms = [];
+    const heading = Math.atan2(tx, tz); // cylinders lie across the road: axis ⟂ travel
+    const across = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, heading, Math.PI / 2));
+    for (let index = 0; index < 5; index++) {
+      const x = px + tx * index * 2.4;
+      const z = pz + tz * index * 2.4;
+      const ground = terrainHeight(x, z) + 0.08;
+      const mesh = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.55, FAIR_TRACK.width, 10).rotateZ(Math.PI / 2));
+      mesh.position.set(x, ground + 0.35, z);
+      mesh.rotation.y = heading;
+      this.mergeInstead(mesh, geoms);
+      const position = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), heading);
+      this.addFixed(null, RAPIER.ColliderDesc.cylinder(FAIR_TRACK.width / 2, 0.55)
+        .setTranslation(x, ground + 0.35, z).setRotation(position.multiply(across)), 'rock');
+    }
+    this.addMerged(geoms, toonMaterial(COLORS.bump));
+  }
+
+  /** A table-top laid on the racing line at circuit angle t, for a lap with airtime in it. */
+  buildTrackTableTop(t) {
+    const angle = t * Math.PI * 2;
+    const [px, pz] = fairPoint(angle);
+    const [tx, tz] = fairTangent(angle);
+    const heading = Math.atan2(-tx, -tz); // wedgePoints rise toward −Z; aim that way down the road
+    const profile = [[0, 0], [-8, 2.2], [-20, 2.2], [-28, 0]];
+    const points = profile.flatMap(([z, y]) => [new THREE.Vector3(-FAIR_TRACK.width / 2, y, z), new THREE.Vector3(FAIR_TRACK.width / 2, y, z)]);
+    this.addConvex(placePoints(points, [px, pz], heading), COLORS.tableTop, 'metal');
+  }
+
+  /** A glowing gate straddling the road at circuit angle t: thread it on the racing line. */
+  buildTrackGate(t) {
+    const angle = t * Math.PI * 2;
+    const [px, pz] = fairPoint(angle);
+    const [tx, tz] = fairTangent(angle);
+    const nx = tz;
+    const nz = -tx; // across the road
+    const geoms = [];
+    const glowGeoms = [];
+    const glowMaterial = toonMaterial(COLORS.megastructureGlow, { emissive: COLORS.megastructureGlow, emissiveIntensity: 1.2 });
+    const beamHeading = Math.atan2(-nz, nx);
+    for (const side of [-1, 1]) {
+      const x = px + nx * side * (FAIR_TRACK.width / 2 + 0.6);
+      const z = pz + nz * side * (FAIR_TRACK.width / 2 + 0.6);
+      const ground = terrainHeight(x, z);
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.16, 7, 6));
+      post.position.set(x, ground + 3.5, z);
+      this.mergeInstead(post, geoms);
+      this.addFixed(null, RAPIER.ColliderDesc.cylinder(3.5, 0.2).setTranslation(x, ground + 3.5, z), 'metal');
+    }
+    const beam = new THREE.Mesh(new THREE.BoxGeometry(FAIR_TRACK.width + 2.4, 0.25, 0.3));
+    beam.position.set(px, terrainHeight(px, pz) + 6.8, pz);
+    beam.rotation.y = beamHeading;
+    this.mergeInstead(beam, glowGeoms);
+    this.addMerged(geoms, toonMaterial(COLORS.megastructure));
+    this.addMerged(glowGeoms, glowMaterial, { shadows: false });
+  }
+
+  /**
+   * The fair ground inside the circuit: a turning Ferris wheel whose gondolas stay level, a spinning
+   * carousel, striped stalls, a big-top tent, and string lights everywhere. The Yard at play.
+   */
+  buildFairground() {
+    const [cx, cz] = FAIR.center;
+    const ground = (x, z) => terrainHeight(x, z);
+    const steelGeoms = [];
+    const woodGeoms = [];
+    const stripeRedGeoms = [];
+    const stripePaleGeoms = [];
+    const tentGeoms = [];
+    const glowMaterial = toonMaterial(COLORS.megastructureGlow, { emissive: COLORS.megastructureGlow, emissiveIntensity: 1.1 });
+    const stripeRed = toonMaterial(COLORS.stripeRed);
+    const stripePale = toonMaterial(COLORS.stripePale);
+
+    // The Ferris wheel: a turning rim with gondolas that stay level, on two A-frames.
+    const fx = cx - 50;
+    const fz = cz;
+    const root = new THREE.Group();
+    root.position.set(fx, ground(fx, fz), fz);
+    root.rotation.y = Math.PI / 2; // the wheel's plane faces north–south, so the village sees it full
+    const wheel = new THREE.Group();
+    wheel.position.y = 23;
+    const rim = new THREE.Mesh(new THREE.TorusGeometry(20, 0.45, 8, 40), glowMaterial.clone());
+    rim.material.emissiveIntensity = 0.7;
+    wheel.add(rim);
+    const spokeGeoms = [];
+    for (let index = 0; index < 8; index++) {
+      const spoke = new THREE.BoxGeometry(0.28, 39.4, 0.28);
+      spoke.rotateZ((index / 8) * Math.PI);
+      spokeGeoms.push(this.prep(spoke));
+    }
+    wheel.add(new THREE.Mesh(mergeGeometries(spokeGeoms), toonMaterial(COLORS.megastructure)));
+    this.ferrisGondolas = [];
+    for (let index = 0; index < 8; index++) {
+      const angle = (index / 8) * Math.PI * 2;
+      const gondola = new THREE.Group();
+      gondola.position.set(Math.cos(angle) * 20, Math.sin(angle) * 20, 0);
+      const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.8, 1.4, 1.4),
+        toonMaterial(index % 2 === 0 ? COLORS.stripeRed : COLORS.tent));
+      cabin.position.y = -1.3;
+      gondola.add(cabin);
+      wheel.add(gondola);
+      this.ferrisGondolas.push(gondola);
+    }
+    root.add(wheel);
+    this.ferrisWheel = wheel;
+    // Supports are static: legs splay in the wheel's plane (world YZ after the root's turn) and
+    // bake into the merged steel batch; the wheel itself stays an animated group of its own.
+    for (const side of [-2, 2]) {
+      for (const lean of [-0.3, 0.3]) {
+        const leg = new THREE.Mesh(new THREE.BoxGeometry(0.5, 24, 0.5));
+        leg.position.set(fx, ground(fx, fz) + 11.5, fz + lean * 11);
+        leg.rotation.x = -lean;
+        this.mergeInstead(leg, steelGeoms);
+        this.addFixed(null, RAPIER.ColliderDesc.cuboid(0.25, 12, 0.25)
+          .setTranslation(fx, ground(fx, fz) + 11.5, fz + lean * 11)
+          .setRotation(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -lean)), 'metal');
+      }
+    }
+    this.scene.add(root);
+
+    // The carousel: a platform that turns, cups that spin on top of that.
+    const platform = new THREE.Group();
+    const px = cx + 25;
+    const pz = cz - 15;
+    platform.position.set(px, ground(px, pz) + 0.2, pz);
+    const disc = new THREE.Mesh(new THREE.CylinderGeometry(6, 6.2, 0.4, 16), toonMaterial(COLORS.booth));
+    platform.add(disc);
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 4.2, 8), toonMaterial(COLORS.megastructure));
+    pole.position.y = 2.1;
+    platform.add(pole);
+    this.carouselCups = [];
+    for (let index = 0; index < 6; index++) {
+      const angle = (index / 6) * Math.PI * 2;
+      const cup = new THREE.Mesh(new THREE.CylinderGeometry(0.85, 0.75, 0.95, 10),
+        toonMaterial(index % 2 === 0 ? COLORS.stripeRed : COLORS.stripePale));
+      cup.position.set(Math.cos(angle) * 4.2, 0.75, Math.sin(angle) * 4.2);
+      platform.add(cup);
+      this.carouselCups.push(cup);
+    }
+    this.carouselPlatform = platform;
+    this.scene.add(platform);
+    this.addFixed(null, RAPIER.ColliderDesc.cylinder(0.25, 6.2).setTranslation(px, ground(px, pz) + 0.25, pz), 'metal');
+
+    // Stalls with striped awnings along the east side.
+    for (let index = 0; index < 4; index++) {
+      const sx = cx + 60;
+      const sz = cz - 30 + index * 20;
+      const body = new THREE.Mesh(new THREE.BoxGeometry(2.6, 2, 1.8));
+      body.position.set(sx, ground(sx, sz) + 1, sz);
+      this.mergeInstead(body, woodGeoms);
+      this.addFixed(null, RAPIER.ColliderDesc.cuboid(1.3, 1, 0.9).setTranslation(sx, ground(sx, sz) + 1, sz), 'metal');
+      for (let stripe = 0; stripe < 3; stripe++) {
+        const awning = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.06, 2.2));
+        awning.position.set(sx - 0.8 + stripe * 0.9, ground(sx, sz) + 2.35, sz - 0.4);
+        awning.rotation.x = 0.25;
+        this.mergeInstead(awning, stripe % 2 === 0 ? stripeRedGeoms : stripePaleGeoms);
+      }
+    }
+
+    // The big top: a striped cone with a pennant, big enough to drive around, not through.
+    const tx = cx - 10;
+    const tz = cz + 45;
+    const tent = new THREE.Mesh(faceted(new THREE.ConeGeometry(9, 8, 10).translate(tx, ground(tx, tz) + 4, tz)), toonMaterial(COLORS.tent));
+    this.mergeInstead(tent, tentGeoms);
+    const pennant = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.5, 0.04), glowMaterial);
+    pennant.position.set(tx, ground(tx, tz) + 8.4, tz);
+    this.scene.add(pennant);
+    this.addFixed(null, RAPIER.ColliderDesc.cylinder(4, 8.6).setTranslation(tx, ground(tx, tz) + 4, tz), 'metal');
+
+    // Bunting poles in a ring, with string lights strung between them.
+    const poleTops = [];
+    for (let index = 0; index < 8; index++) {
+      const angle = (index / 8) * Math.PI * 2;
+      const x = cx + Math.cos(angle) * 90;
+      const z = cz + Math.sin(angle) * 90;
+      const top = ground(x, z) + 4;
+      poleTops.push(new THREE.Vector3(x, top, z));
+      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.1, 4, 6));
+      pole.position.set(x, top - 2, z);
+      this.mergeInstead(pole, woodGeoms);
+    }
+    poleTops.push(poleTops[0].clone()); // close the ring
+    this.addStringLights(poleTops);
+
+    this.addMerged(steelGeoms, toonMaterial(COLORS.megastructure));
+    this.addMerged(woodGeoms, toonMaterial(COLORS.booth), { outline: 0.05 });
+    this.addMerged(stripeRedGeoms, stripeRed);
+    this.addMerged(stripePaleGeoms, stripePale);
+    this.addMerged(tentGeoms, toonMaterial(COLORS.tent), { outline: 0.3 });
+  }
+
+  /** Bulbs strung along a sagging wire through the given pole tops; the poles are the caller's. */
+  addStringLights(poleTops) {
+    const bulbs = [];
+    for (let pole = 0; pole < poleTops.length - 1; pole++) {
+      for (let step = 1; step < 12; step++) {
+        const t = step / 12;
+        const point = poleTops[pole].clone().lerp(poleTops[pole + 1], t);
+        point.y -= Math.sin(Math.PI * t) * 1.1;
+        bulbs.push(point);
+      }
+    }
+    const material = toonMaterial(0xffd9a0, { emissive: 0xffd9a0, emissiveIntensity: 1.6 });
+    const mesh = new THREE.InstancedMesh(new THREE.SphereGeometry(0.09, 6, 4), material, bulbs.length);
+    const matrix = new THREE.Matrix4();
+    bulbs.forEach((point, index) => mesh.setMatrixAt(index, matrix.makeTranslation(point.x, point.y, point.z)));
+    this.scene.add(mesh);
+  }
+
   /** Glowing hex plates that refill a vehicle's surge capacitors: the old grid, still generous. */
   buildBoostPads() {
     this.boostPadMaterial = toonMaterial(COLORS.boostPad, { emissive: COLORS.boostPad, emissiveIntensity: 1.3 });
     const baseGeoms = [];
     const glowGeoms = [];
     for (const pad of BOOST_PADS) {
-      const x = pad.at ? pad.at[0] : pad.salt ? WORLD.salt.center[0] : canyonPathX(pad.roadZ);
-      const z = pad.at ? pad.at[1] : pad.salt ? WORLD.salt.center[1] : pad.roadZ;
+      const x = pad.at ? pad.at[0] : pad.salt ? WORLD.salt.center[0]
+        : pad.fairStart ? fairPoint(0)[0] : canyonPathX(pad.roadZ);
+      const z = pad.at ? pad.at[1] : pad.salt ? WORLD.salt.center[1]
+        : pad.fairStart ? fairPoint(0)[1] : pad.roadZ;
       const y = terrainHeight(x, z);
       const base = new THREE.Mesh(new THREE.CylinderGeometry(pad.radius, pad.radius * 1.08, 0.12, 6));
       base.position.set(x, y + 0.06, z);
@@ -1324,6 +1603,21 @@ export class TestTrack {
 /** The old trade road through the canyon: where the canyon floor's x wanders as it runs north (−z). */
 function canyonPathX(z) {
   return 150 * Math.sin(z * 0.0011) + 60 * Math.sin(z * 0.0027 + 1.7);
+}
+
+/** A point on the fair circuit at angle t (t = 0 is the start/finish line by the village gate). */
+export function fairPoint(t) {
+  const r = FAIR_TRACK.baseRadius + FAIR_TRACK.wave * Math.sin(2 * t) + FAIR_TRACK.wave2 * Math.sin(3 * t + 1);
+  return [FAIR_TRACK.center[0] + Math.sin(t) * r, FAIR_TRACK.center[1] - Math.cos(t) * r];
+}
+
+/** The circuit's unit travel direction at angle t, as [x, z]. */
+export function fairTangent(t) {
+  const e = 0.002;
+  const [ax, az] = fairPoint(t - e);
+  const [bx, bz] = fairPoint(t + e);
+  const length = Math.hypot(bx - ax, bz - az);
+  return [(bx - ax) / length, (bz - az) / length];
 }
 
 /** How deep (x, z) sits inside the canyon corridor: 1 on the road, 0 in the walls. */
