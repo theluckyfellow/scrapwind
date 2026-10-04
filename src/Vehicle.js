@@ -15,11 +15,12 @@ import { disposeTree } from './toon.js';
 
 export const handlingTuning = {
   maxSteerDegrees: 38,        // full lock at a crawl
-  steerSpeed: 4.5,             // rad/s the steering wheels can turn
+  steerSpeed: 6.5,             // rad/s the steering wheels can turn; snappy, not lazy
+  countersteerBoost: 2,        // rate multiplier when the wheels reverse direction: catching a slide never lags
   steerGripMargin: 1.1,        // steering may ask the tyres for this multiple of their cornering grip
   antiRollStiffness: 5000,     // N/m per left–right pair of wheels, resisting body roll
-  yawAssistTorque: 90,         // N·m of turn-in per rad of steer and m/s of ground speed
-  yawAssistMaxSpeed: 16,       // m/s; the turn-in assist fades out between half and this speed
+  yawAssistTorque: 110,        // N·m of turn-in per rad of steer and m/s of ground speed
+  yawAssistMaxSpeed: 24,       // m/s; the turn-in assist fades out between half and this speed
   uprightAssist: 0.35,         // righting torque, as a fraction of weight × sin(roll), with no gyros fitted
   uprightAssistPerGyro: 0.45,  // extra righting per gyro stabilizer bolted on
 };
@@ -427,7 +428,11 @@ export class Vehicle {
       this.gripLimitedSteerAngle(speed, reach, wheels),
     );
     const maxChange = handlingTuning.steerSpeed * dt;
-    this.steerAngle += THREE.MathUtils.clamp(input * maxAngle - this.steerAngle, -maxChange, maxChange);
+    // Reversing the wheels (countersteer, unwinding) runs at boosted rate, so catching a slide is instant.
+    const rate = this.steerAngle !== 0 && Math.sign(input) !== Math.sign(this.steerAngle)
+      ? maxChange * handlingTuning.countersteerBoost
+      : maxChange;
+    this.steerAngle += THREE.MathUtils.clamp(input * maxAngle - this.steerAngle, -rate, rate);
 
     for (const wheel of steering) {
       wheel.setSteerAngle(ackermannAngle(this.steerAngle, reach, this.steeringLineZ - wheel.hubZ(), wheel.hubX()));
