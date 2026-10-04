@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js';
-import { toonMesh, toonMaterial, faceted } from './toon.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { toonMesh, toonMaterial, faceted, addOutline } from './toon.js';
 
 /** Ground types: grip multiplies the tyre's grip; rolling resistance is a fraction of the tyre's load; loose ground favours paddle and knobbly tyres. */
 export const SURFACES = {
@@ -268,12 +269,57 @@ export class TestTrack {
 
   // ---- Building blocks ----
 
+  /**
+   * The world is hundreds of static, same-material meshes; drawn individually that is a thousand
+   * draw calls a frame. Instead, builders collect geometries here and one merged mesh goes to the
+   * GPU per batch: same pixels, a fraction of the draws. Colliders are unaffected.
+   */
+
+  /** Normalises a geometry for merging: un-indexed, flat normals where missing, no uvs. */
+  prep(geometry) {
+    const split = geometry.index ? geometry.toNonIndexed() : geometry;
+    if (!split.attributes.normal) split.computeVertexNormals();
+    split.deleteAttribute('uv');
+    return split;
+  }
+
+  /** Bakes a built mesh's geometry into a merge list, in world space; the mesh itself never draws. */
+  mergeInstead(mesh, list) {
+    mesh.updateMatrixWorld(true);
+    list.push(this.prep(mesh.geometry.clone().applyMatrix4(mesh.matrixWorld)));
+  }
+
+  /** Bakes a whole subtree (a positioned group) into a merge list. */
+  mergeTreeInstead(root, list) {
+    root.updateMatrixWorld(true);
+    root.traverse(node => {
+      if (node.isMesh) list.push(this.prep(node.geometry.clone().applyMatrix4(node.matrixWorld)));
+    });
+  }
+
+  /** One mesh for many geometries, optionally with one shared ink outline. */
+  addMerged(list, material, { outline = 0, shadows = true } = {}) {
+    if (list.length === 0) return null;
+    const mesh = new THREE.Mesh(mergeGeometries(list), material);
+    mesh.castShadow = shadows;
+    mesh.receiveShadow = shadows;
+    this.scene.add(mesh);
+    if (outline > 0) addOutline(mesh, outline);
+    return mesh;
+  }
+
   /** Adds a mesh to the scene and a fixed collider to the world, tagging the collider's surface. */
   addFixed(mesh, colliderDescription, surface) {
     if (mesh) this.scene.add(mesh);
     const collider = this.world.createCollider(colliderDescription);
     if (surface) this.surfaces.set(collider.handle, SURFACES[surface]);
     return collider;
+  }
+
+  /** A collider for a convex solid, with no mesh of its own (the visual goes into a merged batch). */
+  addConvexCollider(points, surface) {
+    const flat = new Float32Array(points.flatMap(point => [point.x, point.y, point.z]));
+    return this.addFixed(null, RAPIER.ColliderDesc.convexHull(flat), surface);
   }
 
   /** A convex solid from world-space points, drawn and collided identically. */
@@ -446,17 +492,18 @@ export class TestTrack {
   buildWashboard() {
     const { at, length, width, spacing, bumpHeight, bumpRadius } = WASHBOARD;
     const bumpCount = Math.floor(length / spacing);
-    const geometry = new THREE.CylinderGeometry(bumpRadius, bumpRadius, width, 10);
-    geometry.rotateZ(Math.PI / 2);
+    const geoms = [];
     const lyingDown = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI / 2);
     for (let index = 0; index < bumpCount; index++) {
       const z = at[1] - index * spacing;
       const y = bumpHeight - bumpRadius;
-      const mesh = toonMesh(geometry, COLORS.bump, { outline: 0.03 });
+      const mesh = new THREE.Mesh(new THREE.CylinderGeometry(bumpRadius, bumpRadius, width, 10).rotateZ(Math.PI / 2));
       mesh.position.set(at[0], y, z);
+      this.mergeInstead(mesh, geoms);
       const description = RAPIER.ColliderDesc.cylinder(width / 2, bumpRadius).setTranslation(at[0], y, z).setRotation(lyingDown);
-      this.addFixed(mesh, description, 'rock');
+      this.addFixed(null, description, 'rock');
     }
+    this.addMerged(geoms, toonMaterial(COLORS.bump));
   }
 
   buildSurfaceLanes() {
@@ -468,15 +515,18 @@ export class TestTrack {
   }
 
   buildMesas() {
+    const geoms = [];
     for (const mesa of MESAS) {
       const [x, z] = mesa.at;
       const base = terrainHeight(x, z) - 4;
       const geometry = new THREE.CylinderGeometry(mesa.radius * 0.82, mesa.radius, mesa.height, mesa.sides);
       geometry.translate(x, base + mesa.height / 2, z);
       const points = pointsOf(geometry).map(point => point.add(jitter(this.random, mesa.radius * 0.05)));
-      this.addConvex(points, COLORS.mesa, 'rock', 0.25);
+      geoms.push(new ConvexGeometry(points));
+      this.addConvexCollider(points, 'rock');
       if (mesa.pad) this.addLandingPad(x, base + mesa.height, z, Math.min(mesa.radius * 0.5, 6));
     }
+    this.addMerged(geoms, toonMaterial(COLORS.mesa), { outline: 0.3 });
   }
 
   buildCuriosities() {
@@ -520,6 +570,7 @@ export class TestTrack {
   }
 
   scatterRocks() {
+    const geoms = [];
     for (let index = 0; index < ROCK_COUNT; index++) {
       const angle = this.random() * Math.PI * 2;
       const distance = THREE.MathUtils.lerp(WORLD.basinRadius + 15, WORLD.rimStart - 100, this.random() ** 1.5);
@@ -528,8 +579,10 @@ export class TestTrack {
       if (z < WORLD.canyon.start && canyonCorridor(x, z) > 0.3) continue; // keep the road clear
       const size = THREE.MathUtils.lerp(1.2, 6.5, this.random() ** 2);
       const points = rockPoints(this.random, x, terrainHeight(x, z) + size * 0.25, z, size, size * 0.7, size);
-      this.addConvex(points, COLORS.rock, 'rock', 0.05 + size * 0.015);
+      geoms.push(new ConvexGeometry(points));
+      this.addConvexCollider(points, 'rock');
     }
+    this.addMerged(geoms, toonMaterial(COLORS.rock), { outline: 0.1 });
   }
 
   /** Dry scrub: decoration only, drive straight through it. */
@@ -562,33 +615,36 @@ export class TestTrack {
 
   /** The valley wall: a ring of peaks outside the terrain rim, snow on the tall ones, wide clouds above. */
   buildHorizon() {
-    const mountainMaterial = toonMaterial(COLORS.mountain);
-    const snowMaterial = toonMaterial(COLORS.snow);
+    const mountainGeoms = [];
+    const snowGeoms = [];
     for (let index = 0; index < MOUNTAIN_COUNT; index++) {
       const angle = (index / MOUNTAIN_COUNT) * Math.PI * 2 + this.random() * 0.12;
       const distance = THREE.MathUtils.lerp(2650, 3150, this.random());
       const radius = THREE.MathUtils.lerp(180, 380, this.random());
       const height = THREE.MathUtils.lerp(150, 420, this.random());
-      const mountain = new THREE.Mesh(faceted(new THREE.ConeGeometry(radius, height, 6)), mountainMaterial);
+      const mountain = new THREE.Mesh(faceted(new THREE.ConeGeometry(radius, height, 6)));
       mountain.position.set(Math.cos(angle) * distance, height / 2 - 20, Math.sin(angle) * distance);
       mountain.rotation.y = this.random() * Math.PI;
-      this.scene.add(mountain);
+      this.mergeInstead(mountain, mountainGeoms);
       if (height > SNOW_HEIGHT) {
         const snowHeight = height * 0.28;
-        const snow = new THREE.Mesh(faceted(new THREE.ConeGeometry(radius * 0.34, snowHeight, 6)), snowMaterial);
+        const snow = new THREE.Mesh(faceted(new THREE.ConeGeometry(radius * 0.34, snowHeight, 6)));
         snow.position.set(mountain.position.x, mountain.position.y + height / 2 - snowHeight / 2, mountain.position.z);
         snow.rotation.y = mountain.rotation.y;
-        this.scene.add(snow);
+        this.mergeInstead(snow, snowGeoms);
       }
     }
+    this.addMerged(mountainGeoms, toonMaterial(COLORS.mountain), { shadows: false });
+    this.addMerged(snowGeoms, toonMaterial(COLORS.snow), { shadows: false });
 
-    const cloudMaterial = toonMaterial(COLORS.cloud, { fog: false });
+    // Every cloud in the valley is one merged mesh: a hundred puffs, a single draw call.
+    const cloudGeoms = [];
     for (let index = 0; index < CLOUD_COUNT; index++) {
       const cloud = new THREE.Group();
       const puffs = 3 + Math.floor(this.random() * 4);
       for (let puff = 0; puff < puffs; puff++) {
         const size = THREE.MathUtils.lerp(20, 55, this.random());
-        const mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(size, 0), cloudMaterial);
+        const mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(size, 0));
         mesh.position.set(puff * size * 0.9, this.random() * 8, this.random() * 16);
         mesh.scale.y = 0.5;
         cloud.add(mesh);
@@ -597,8 +653,9 @@ export class TestTrack {
       const distance = THREE.MathUtils.lerp(400, 2700, this.random());
       cloud.position.set(Math.cos(angle) * distance, THREE.MathUtils.lerp(260, 460, this.random()), Math.sin(angle) * distance);
       cloud.rotation.y = this.random() * Math.PI;
-      this.scene.add(cloud);
+      this.mergeTreeInstead(cloud, cloudGeoms);
     }
+    this.addMerged(cloudGeoms, toonMaterial(COLORS.cloud, { fog: false }), { shadows: false });
   }
 
   /** Crates and barrels to knock over near the start. */
@@ -632,13 +689,17 @@ export class TestTrack {
 
   /** The old trade road's furniture follows the canyon: watchtowers, the dead power line, waymark banners. */
   buildLandmarks() {
+    const towerGeoms = [];
+    const pylonGeoms = [];
     for (const mark of ROAD_MARKS) {
-      if (mark.kind === 'tower') this.buildBeaconTower(canyonPathX(mark.z) + 30, mark.z);
+      if (mark.kind === 'tower') this.buildBeaconTower(canyonPathX(mark.z) + 30, mark.z, towerGeoms);
       if (mark.kind === 'pylonLine') {
-        for (let z = mark.fromZ; z >= mark.toZ; z -= mark.every) this.buildPylon(canyonPathX(z) + mark.side, z);
+        for (let z = mark.fromZ; z >= mark.toZ; z -= mark.every) this.buildPylon(canyonPathX(z) + mark.side, z, pylonGeoms);
       }
       if (mark.kind === 'banners') this.buildBanners(mark);
     }
+    this.addMerged(towerGeoms, toonMaterial(COLORS.tower), { outline: 0.15 });
+    this.addMerged(pylonGeoms, toonMaterial(COLORS.pylon), { outline: 0.08 });
     this.buildRelay();
     this.buildMarbles();
     this.buildPoplarGroves();
@@ -671,7 +732,7 @@ export class TestTrack {
   /** The giant's marbles: house-sized stone spheres half-buried in the southern meadows. */
   buildMarbles() {
     const { at, spread, count, minRadius, maxRadius } = MARBLES;
-    const material = toonMaterial(COLORS.rock);
+    const geoms = [];
     for (let index = 0; index < count; index++) {
       const angle = this.random() * Math.PI * 2;
       const distance = Math.sqrt(this.random()) * spread;
@@ -680,11 +741,12 @@ export class TestTrack {
       const radius = THREE.MathUtils.lerp(minRadius, maxRadius, this.random());
       const ground = terrainHeight(x, z);
       const y = ground + radius * 0.55;
-      const marble = toonMesh(faceted(new THREE.SphereGeometry(radius, 10, 7)), material, { outline: radius * 0.05 });
+      const marble = new THREE.Mesh(faceted(new THREE.SphereGeometry(radius, 10, 7)));
       marble.position.set(x, y, z);
-      this.scene.add(marble);
+      this.mergeInstead(marble, geoms);
       this.addFixed(null, RAPIER.ColliderDesc.ball(radius * 0.92).setTranslation(x, y, z), 'rock');
     }
+    this.addMerged(geoms, toonMaterial(COLORS.rock), { outline: 0.4 });
   }
 
   /** Journey-cloth waymarks along the road: tall poles, a small bright flag each, instanced for cheap. */
@@ -713,22 +775,26 @@ export class TestTrack {
   }
 
   /** A rammed-earth watchtower: square, tapering, with a battlement ring on top. */
-  buildBeaconTower(x, z) {
+  buildBeaconTower(x, z, geoms) {
     const base = terrainHeight(x, z) - 1;
     const tower = pointsOf(faceted(new THREE.CylinderGeometry(2.1, 3.0, 12, 4).rotateY(Math.PI / 4).translate(x, base + 6, z)));
-    this.addConvex(tower, COLORS.tower, 'rock', 0.1);
+    geoms.push(new ConvexGeometry(tower));
+    this.addConvexCollider(tower, 'rock');
     const cap = pointsOf(faceted(new THREE.CylinderGeometry(3.0, 2.3, 1.4, 4).rotateY(Math.PI / 4).translate(x, base + 12.6, z)));
-    this.addConvex(cap, COLORS.tower, 'rock', 0.08);
+    geoms.push(new ConvexGeometry(cap));
+    this.addConvexCollider(cap, 'rock');
   }
 
   /** A dead transmission pylon: a tapered lattice mast with two crossarms, marching off to nowhere. */
-  buildPylon(x, z) {
+  buildPylon(x, z, geoms) {
     const base = terrainHeight(x, z) - 1;
     const body = pointsOf(faceted(new THREE.CylinderGeometry(0.55, 1.3, 26, 4).rotateY(Math.PI / 4).translate(x, base + 13, z)));
-    this.addConvex(body, COLORS.pylon, 'metal', 0.06);
+    geoms.push(new ConvexGeometry(body));
+    this.addConvexCollider(body, 'metal');
     for (const [level, span] of [[18, 6.5], [22, 4.5]]) {
       const arm = pointsOf(faceted(new THREE.BoxGeometry(span, 0.5, 0.5).translate(x, base + level, z)));
-      this.addConvex(arm, COLORS.pylon, 'metal', 0.05);
+      geoms.push(new ConvexGeometry(arm));
+      this.addConvexCollider(arm, 'metal');
     }
   }
 
@@ -824,9 +890,9 @@ export class TestTrack {
   /** Giant dead dishes in the deep dunes, still tipped toward the sun they were built to drink. */
   buildDishFarm() {
     const { center, spread, count, minRadius, maxRadius } = DISH_FARM;
-    const dishMaterial = toonMaterial(COLORS.dish, { side: THREE.DoubleSide });
-    const pylonMaterial = toonMaterial(COLORS.megastructure);
-    const glowMaterial = toonMaterial(COLORS.megastructureGlow, { emissive: COLORS.megastructureGlow, emissiveIntensity: 0.7 });
+    const pylonGeoms = [];
+    const bowlGeoms = [];
+    const lipGeoms = [];
     for (let index = 0; index < count; index++) {
       const angle = this.random() * Math.PI * 2;
       const distance = Math.sqrt(this.random()) * spread;
@@ -837,23 +903,29 @@ export class TestTrack {
       const pylonHeight = radius * 0.8;
 
       const dish = new THREE.Group();
-      const pylon = new THREE.Mesh(new THREE.CylinderGeometry(radius * 0.09, radius * 0.14, pylonHeight, 8), pylonMaterial);
+      const pylon = new THREE.Mesh(new THREE.CylinderGeometry(radius * 0.09, radius * 0.14, pylonHeight, 8));
       pylon.position.y = pylonHeight / 2;
       dish.add(pylon);
-      const bowl = new THREE.Mesh(faceted(new THREE.SphereGeometry(radius, 14, 6, 0, Math.PI * 2, 0, 0.5)), dishMaterial);
+      const bowl = new THREE.Mesh(faceted(new THREE.SphereGeometry(radius, 14, 6, 0, Math.PI * 2, 0, 0.5)));
       bowl.position.y = pylonHeight;
       bowl.rotation.set(0.55, 0, -0.25); // tipped sunward, frozen mid-drink
       if (index % 3 === 0) {
-        const lip = new THREE.Mesh(new THREE.TorusGeometry(radius * Math.sin(0.5), radius * 0.02, 6, 28).rotateX(Math.PI / 2), glowMaterial);
+        const lip = new THREE.Mesh(new THREE.TorusGeometry(radius * Math.sin(0.5), radius * 0.02, 6, 28).rotateX(Math.PI / 2));
         lip.position.y = radius * Math.cos(0.5);
         bowl.add(lip);
       }
       dish.add(bowl);
       dish.position.set(x, base, z);
       dish.rotation.y = this.random() * 0.6 - 0.3;
-      this.scene.add(dish);
+      dish.updateMatrixWorld(true);
+      this.mergeInstead(pylon, pylonGeoms);
+      this.mergeInstead(bowl, bowlGeoms);
+      if (index % 3 === 0) this.mergeInstead(bowl.children[0], lipGeoms);
       this.addFixed(null, RAPIER.ColliderDesc.cylinder(pylonHeight / 2, radius * 0.12).setTranslation(x, base + pylonHeight / 2, z), 'metal');
     }
+    this.addMerged(pylonGeoms, toonMaterial(COLORS.megastructure), { shadows: false });
+    this.addMerged(bowlGeoms, toonMaterial(COLORS.dish, { side: THREE.DoubleSide }), { shadows: false });
+    this.addMerged(lipGeoms, toonMaterial(COLORS.megastructureGlow, { emissive: COLORS.megastructureGlow, emissiveIntensity: 0.7 }), { shadows: false });
   }
 
   /** A wrecked hull the size of a town block, half-swallowed by the western dune sea. */
@@ -920,28 +992,35 @@ export class TestTrack {
     }
     this.silkHeights = { from, segmentLength, heights };
 
+    const deckGeoms = [];
+    const stripGeoms = [];
+    const pylonGeoms = [];
     for (let index = 0; index < count; index++) {
       const x = from + (index + 0.5) * segmentLength;
       const pitch = Math.atan2(heights[index + 1] - heights[index], segmentLength);
-      const deck = new THREE.Mesh(new THREE.BoxGeometry(segmentLength + 2, 1.4, 9), concrete);
+      const deck = new THREE.Mesh(new THREE.BoxGeometry(segmentLength + 2, 1.4, 9));
       deck.position.set(x, (heights[index] + heights[index + 1]) / 2, z);
       deck.rotation.z = pitch;
-      this.scene.add(deck);
+      this.mergeInstead(deck, deckGeoms);
       if (index % 2 === 0) {
-        const strip = new THREE.Mesh(new THREE.BoxGeometry(segmentLength / 2, 0.18, 0.18), glowMaterial);
+        const strip = new THREE.Mesh(new THREE.BoxGeometry(segmentLength / 2, 0.18, 0.18));
         strip.position.set(0, 0.85, -4.3);
         deck.add(strip);
+        this.mergeInstead(strip, stripGeoms);
       }
       const ground = terrainHeight(from + index * segmentLength, z) - 2;
       const pylonHeight = heights[index] - ground;
       if (pylonHeight > 5) {
         const px = from + index * segmentLength;
-        const pylon = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 2.4, pylonHeight, 8), concrete);
+        const pylon = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 2.4, pylonHeight, 8));
         pylon.position.set(px, ground + pylonHeight / 2, z);
-        this.scene.add(pylon);
+        this.mergeInstead(pylon, pylonGeoms);
         this.addFixed(null, RAPIER.ColliderDesc.cylinder(pylonHeight / 2, 1.9).setTranslation(px, ground + pylonHeight / 2, z), 'concrete');
       }
     }
+    this.addMerged(deckGeoms, concrete);
+    this.addMerged(stripGeoms, glowMaterial, { shadows: false });
+    this.addMerged(pylonGeoms, concrete);
     // Where the line meets the valley wall it dives into a portal, not a dead end.
     for (const end of [from, to]) {
       const portal = toonMesh(new THREE.BoxGeometry(6, 22, 16), COLORS.megastructure, { outline: 0.3 });
@@ -992,6 +1071,11 @@ export class TestTrack {
     const [centerX, centerZ] = SETTLEMENT.center;
     const ground = (x, z) => terrainHeight(x, z);
     const at = (local, y = 0) => new THREE.Vector3(centerX + local[0], ground(centerX + local[0], centerZ + local[1]) + y, centerZ + local[1]);
+    const containersByColor = new Map(); // one merged mesh per paint colour
+    const steelGeoms = [];
+    const postGeoms = [];
+    const roofGeoms = [];
+    const solarGeoms = [];
 
     // Container buildings, two of them stacked.
     const containers = [
@@ -1002,28 +1086,38 @@ export class TestTrack {
       { local: [16, 2], size: [7, 2.8, 3], color: 0xb85c42, heading: 0.35 },
       { local: [-2, 14], size: [6, 2.6, 3], color: 0x3f8f8a, heading: 1.1 },
     ];
-    for (const box of containers) {
-      this.addBox(new THREE.Vector3(...box.size), at(box.local, box.size[1] / 2 + (box.lift ?? 0)),
-        new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), box.heading), box.color, 'metal', 0.06);
+    for (const container of containers) {
+      const size = new THREE.Vector3(...container.size);
+      const position = at(container.local, size.y / 2 + (container.lift ?? 0));
+      const quaternion = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), container.heading);
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(size.x, size.y, size.z));
+      mesh.position.copy(position);
+      mesh.quaternion.copy(quaternion);
+      if (!containersByColor.has(container.color)) containersByColor.set(container.color, []);
+      this.mergeInstead(mesh, containersByColor.get(container.color));
+      const description = RAPIER.ColliderDesc.cuboid(size.x / 2, size.y / 2, size.z / 2)
+        .setTranslation(position.x, position.y, position.z)
+        .setRotation(quaternion);
+      this.addFixed(null, description, 'metal');
     }
 
     // Work canopies: a flat roof on poles, one wearing solar tiles, one sheltering the charge point.
     for (const [local, solar] of [[[-2, -2], true], [[8, 6], false]]) {
       const origin = at(local);
-      const roof = toonMesh(new THREE.BoxGeometry(6, 0.15, 5), 0xd8d2c4, { outline: 0.04 });
+      const roof = new THREE.Mesh(new THREE.BoxGeometry(6, 0.15, 5));
       roof.position.copy(origin).y += 3;
-      this.scene.add(roof);
+      this.mergeInstead(roof, roofGeoms);
       for (const [dx, dz] of [[-2.7, -2.2], [2.7, -2.2], [-2.7, 2.2], [2.7, 2.2]]) {
-        const pole = toonMesh(new THREE.CylinderGeometry(0.07, 0.07, 3, 6), 0x5f6a70, { outline: 0 });
+        const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 3, 6));
         pole.position.copy(origin).add(new THREE.Vector3(dx, 1.5, dz));
-        this.scene.add(pole);
+        this.mergeInstead(pole, steelGeoms);
       }
       if (solar) {
         for (const dx of [-1.5, 0, 1.5]) {
-          const tile = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.05, 4.4), toonMaterial(0x24344a));
+          const tile = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.05, 4.4));
           tile.position.copy(origin).add(new THREE.Vector3(dx, 3.15, 0));
           tile.rotation.z = 0.18;
-          this.scene.add(tile);
+          this.mergeInstead(tile, solarGeoms);
         }
       }
     }
@@ -1034,9 +1128,9 @@ export class TestTrack {
     tank.position.copy(tankOrigin).y += 3.4;
     this.scene.add(tank);
     for (const [dx, dz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
-      const leg = toonMesh(new THREE.CylinderGeometry(0.09, 0.09, 2.2, 6), 0x5f6a70, { outline: 0 });
+      const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 2.2, 6));
       leg.position.copy(tankOrigin).add(new THREE.Vector3(dx, 1.1, dz));
-      this.scene.add(leg);
+      this.mergeInstead(leg, steelGeoms);
     }
 
     // String lights around the plaza.
@@ -1056,9 +1150,9 @@ export class TestTrack {
     bulbs.forEach((point, index) => bulbMesh.setMatrixAt(index, matrix.makeTranslation(point.x, point.y, point.z)));
     this.scene.add(bulbMesh);
     for (const top of poleTops) {
-      const pole = toonMesh(new THREE.CylinderGeometry(0.06, 0.08, 3.6, 6), 0x5a4632, { outline: 0 });
+      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 3.6, 6));
       pole.position.set(top.x, top.y - 1.8, top.z);
-      this.scene.add(pole);
+      this.mergeInstead(pole, postGeoms);
     }
 
     // The gate sign on the road in: 拾风, "gathering wind" — what the Yard calls itself.
@@ -1071,9 +1165,9 @@ export class TestTrack {
     board.rotation.y = 0.9;
     this.scene.add(board);
     for (const dx of [-1.9, 1.9]) {
-      const post = toonMesh(new THREE.CylinderGeometry(0.09, 0.11, 4.4, 6), 0x5a4632, { outline: 0 });
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.11, 4.4, 6));
       post.position.copy(signOrigin).add(new THREE.Vector3(dx, 2.2, 0));
-      this.scene.add(post);
+      this.mergeInstead(post, postGeoms);
     }
     const chargeSign = new THREE.Mesh(
       new THREE.BoxGeometry(1.8, 0.9, 0.1),
@@ -1081,27 +1175,36 @@ export class TestTrack {
     );
     chargeSign.position.copy(at([-2, -2], 2.2));
     this.scene.add(chargeSign);
+
+    for (const [color, geoms] of containersByColor) this.addMerged(geoms, toonMaterial(color), { outline: 0.06 });
+    this.addMerged(steelGeoms, toonMaterial(0x5f6a70));
+    this.addMerged(postGeoms, toonMaterial(0x5a4632));
+    this.addMerged(roofGeoms, toonMaterial(0xd8d2c4), { outline: 0.04 });
+    this.addMerged(solarGeoms, toonMaterial(0x24344a));
   }
 
   /** Glowing hex plates that refill a vehicle's surge capacitors: the old grid, still generous. */
   buildBoostPads() {
     this.boostPadMaterial = toonMaterial(COLORS.boostPad, { emissive: COLORS.boostPad, emissiveIntensity: 1.3 });
-    const baseMaterial = toonMaterial(COLORS.pad);
+    const baseGeoms = [];
+    const glowGeoms = [];
     for (const pad of BOOST_PADS) {
       const x = pad.at ? pad.at[0] : pad.salt ? WORLD.salt.center[0] : canyonPathX(pad.roadZ);
       const z = pad.at ? pad.at[1] : pad.salt ? WORLD.salt.center[1] : pad.roadZ;
       const y = terrainHeight(x, z);
-      const base = new THREE.Mesh(new THREE.CylinderGeometry(pad.radius, pad.radius * 1.08, 0.12, 6), baseMaterial);
+      const base = new THREE.Mesh(new THREE.CylinderGeometry(pad.radius, pad.radius * 1.08, 0.12, 6));
       base.position.set(x, y + 0.06, z);
-      this.scene.add(base);
-      const plate = new THREE.Mesh(new THREE.CylinderGeometry(pad.radius * 0.72, pad.radius * 0.72, 0.06, 6), this.boostPadMaterial);
+      this.mergeInstead(base, baseGeoms);
+      const plate = new THREE.Mesh(new THREE.CylinderGeometry(pad.radius * 0.72, pad.radius * 0.72, 0.06, 6));
       plate.position.set(x, y + 0.15, z);
-      this.scene.add(plate);
-      const ring = new THREE.Mesh(new THREE.TorusGeometry(pad.radius * 0.9, 0.1, 6, 24).rotateX(Math.PI / 2), this.boostPadMaterial);
+      this.mergeInstead(plate, glowGeoms);
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(pad.radius * 0.9, 0.1, 6, 24).rotateX(Math.PI / 2));
       ring.position.set(x, y + 0.16, z);
-      this.scene.add(ring);
+      this.mergeInstead(ring, glowGeoms);
       this.boostPads.push({ x, z, y, radius: pad.radius });
     }
+    this.addMerged(baseGeoms, toonMaterial(COLORS.pad));
+    this.addMerged(glowGeoms, this.boostPadMaterial, { shadows: false });
   }
 }
 

@@ -11,7 +11,7 @@ const BLOOM_RADIUS = 0.5;
 const BLOOM_THRESHOLD = 0.85; // only the sun, emissive strips and the beacon crest this
 const EXPOSURE = 1.1;
 const SHAFT_INTENSITY = 0.55;
-const SHAFT_TAPS = 26;
+const SHAFT_TAPS = 20;
 
 // Screen-space sun shafts: a radial blur pulled from the sun's spot in the frame, so mesas, pylons
 // and the ringway cut visible beams out of the glow. Fades to nothing when the sun is behind us.

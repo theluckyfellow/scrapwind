@@ -28,7 +28,7 @@ const SPAWN_HEADING = 0;          // radians; 0 faces north (−Z), toward the r
 const FALL_LIMIT = -60;           // m; below this the vehicle is lost and respawns
 const CAMERA_NEAR = 0.1;
 const CAMERA_FAR = 6500;
-const MAX_PIXEL_RATIO = 2;
+const MAX_PIXEL_RATIO = 1.75; // a 4K screen at full ratio quadruples the post-processing cost for little gain
 const LAST_DESIGN_KEY = 'scrapwind-last-design';
 const ZERO = new THREE.Vector3();
 
